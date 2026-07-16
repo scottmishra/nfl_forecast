@@ -47,6 +47,35 @@ def forecast(
 
 
 @app.command()
+def backtest(
+    source: str = typer.Option("nflverse", help="nflverse | demo"),
+    seasons: str = typer.Option("", help="history to load, e.g. 2019,2020,...,2024"),
+    test_season: int = typer.Option(0, help="season to replay (default: latest played)"),
+    weeks: str = typer.Option("", help="weeks to replay, e.g. 1-8 or 1,3,5 (default: all)"),
+    sims: int = typer.Option(200, help="sim replicates per historical game"),
+    engine: str = typer.Option("gbm", help="gbm | neural"),
+):
+    """Walk-forward backtest: replay a past season and score vs actuals."""
+    from gameday import backtest as bt
+
+    season_list = [int(s) for s in seasons.split(",") if s] or None
+    week_list: list[int] | None = None
+    if weeks:
+        if "-" in weeks:
+            lo, hi = weeks.split("-")
+            week_list = list(range(int(lo), int(hi) + 1))
+        else:
+            week_list = [int(w) for w in weeks.split(",")]
+
+    report = bt.run_backtest(
+        source=source, seasons=season_list,
+        test_season=test_season or None, weeks=week_list,
+        n_sims=sims, engine=engine,
+    )
+    typer.echo(bt.format_report(report))
+
+
+@app.command()
 def serve(host: str = "0.0.0.0", port: int = 8000, reload: bool = False):
     """Serve the API and dashboard."""
     import uvicorn

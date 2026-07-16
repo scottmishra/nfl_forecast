@@ -87,6 +87,35 @@ providers:
 gameday forecast --buzz reddit
 ```
 
+## Backtesting on real historical games
+
+`gameday backtest` replays a past season walk-forward, with real players and
+real results:
+
+```bash
+# train on 2019–2023, replay every week of 2024, score vs what actually happened
+gameday backtest --seasons 2019,2020,2021,2022,2023,2024 --test-season 2024
+
+# quicker: a slice of weeks, fewer sim replicates
+gameday backtest --seasons 2021,2022,2023,2024 --test-season 2024 --weeks 1-8 --sims 100
+```
+
+Player models train **only on seasons before the test season**; sim profiles
+re-calibrate each week from **strictly prior games** — nothing the model sees
+existed after kickoff. The report (console + `artifacts/backtest/report.json`)
+scores:
+
+- **Player forecasts** — median MAE vs a naive trailing-8-game baseline
+  (`skill_vs_naive` = how much the model beats "just average recent games"),
+  p10–p90 interval coverage (well-calibrated ≈ 80%), and pinball loss
+- **Game sims** — Brier score for home win probability (coin flip = 0.250),
+  favorite accuracy, points / total-points MAE, play-count and pass-rate MAE,
+  and a win-probability reliability table (forecast bucket → realized rate)
+
+Backtest model artifacts are isolated under `artifacts/backtest/` and never
+overwrite production models. `--source demo` runs the same machinery on the
+synthetic league (used by the test suite, works offline).
+
 ## The dashboard
 
 - **Slate view** — every game as a card with team-color rails, venue,
@@ -119,7 +148,8 @@ dark surface; identity is never encoded by color alone.
 gameday/
   config.py        seasons, positions/stats, quantiles, model params
   pipeline.py      data -> features -> train -> forecast orchestration
-  cli.py           gameday demo | forecast | serve
+  backtest.py      walk-forward replay of past seasons, scored vs actuals
+  cli.py           gameday demo | forecast | backtest | serve
   data/
     nflverse.py    weekly player stats + schedules (cached parquet)
     weather.py     Open-Meteo archive & forecast client, dome-aware
