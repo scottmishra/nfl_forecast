@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gameday Edge — NFL Forecaster</title>
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏈</text></svg>">
+</head>
+<body data-palette="#3987e5,#008300,#d55181,#c98500">
+<div class="field-lines" aria-hidden="true"></div>
+
+<header class="topbar">
+  <a class="brand" href="#" id="brand-link">
+    <span class="brand-badge">🏈</span>
+    <span class="brand-word">GAMEDAY<em>EDGE</em></span>
+  </a>
+  <div class="week-pill" id="week-pill">—</div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search players…" autocomplete="off"
+           aria-label="Search players">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+</header>
+
+<main id="view" class="view">
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <p>Warming up the film room…</p>
+  </div>
+</main>
+
+<footer class="footer">
+  <span>Quantile forecasts · p10 floor / p50 line / p90 ceiling</span>
+  <span class="footer-dot">·</span>
+  <span>Weather via Open-Meteo · Stats via nflverse</span>
+</footer>
+
+<div id="tooltip" class="tooltip" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
