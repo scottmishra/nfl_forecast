@@ -107,9 +107,12 @@ async function renderSlate() {
 
 async function renderGame(gameId) {
   view.innerHTML = `<div class="loading"><div class="spinner"></div><p>Breaking down the matchup…</p></div>`;
-  let g;
+  let g, sim = null;
   try {
-    g = await api(`/api/game/${encodeURIComponent(gameId)}`);
+    [g, sim] = await Promise.all([
+      api(`/api/game/${encodeURIComponent(gameId)}`),
+      api(`/api/game/${encodeURIComponent(gameId)}/sim`).catch(() => null),
+    ]);
   } catch (err) {
     return renderError(err);
   }
@@ -127,13 +130,144 @@ async function renderGame(gameId) {
         <div class="team-chip">${teamLogo(home)}<div class="team-name">${esc(home.name)}</div></div>
       </div>
     </section>
-    <div class="teams-cols">
-      ${teamColumn(g.away)}
-      ${teamColumn(g.home)}
-    </div>`;
+    ${sim ? `
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="forecasts">Player Forecasts</button>
+        <button class="tab" data-tab="sim">Game Simulation
+          <span class="tab-note">${sim.n_sims.toLocaleString()} sims</span></button>
+      </nav>` : ""}
+    <div id="panel-forecasts" class="tab-panel">
+      <div class="teams-cols">
+        ${teamColumn(g.away)}
+        ${teamColumn(g.home)}
+      </div>
+    </div>
+    ${sim ? `<div id="panel-sim" class="tab-panel" hidden>${simPanel(g, sim)}</div>` : ""}`;
 
   document.getElementById("back").addEventListener("click", () => { location.hash = ""; });
+  view.querySelectorAll(".tab").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      view.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
+      view.querySelectorAll(".tab-panel").forEach((p) => {
+        p.hidden = p.id !== `panel-${btn.dataset.tab}`;
+      });
+    }));
   bindStripTooltips();
+}
+
+/* ---------- simulation panel ---------- */
+
+function simPanel(g, sim) {
+  const away = g.away.team, home = g.home.team;
+  const sa = sim.teams[away.abbr], sh = sim.teams[home.abbr];
+  const awayPct = Math.round(sim.away_win_prob * 100);
+  const homePct = Math.round(sim.home_win_prob * 100);
+  const tiePct = Math.max(0, 100 - awayPct - homePct);
+  return `
+    <section class="sim-hero">
+      <div class="sim-score">
+        <span class="sim-score-team" style="color:${esc(away.primary)}">${esc(away.abbr)}</span>
+        <span class="sim-score-num">${sa.points.p50}</span>
+        <span class="sim-score-dash">–</span>
+        <span class="sim-score-num">${sh.points.p50}</span>
+        <span class="sim-score-team" style="color:${esc(home.primary)}">${esc(home.abbr)}</span>
+      </div>
+      <div class="sim-score-sub">projected median score · ${sim.n_sims.toLocaleString()} simulated games</div>
+      <div class="winprob" role="img"
+           aria-label="Win probability: ${esc(away.abbr)} ${awayPct}%, ${esc(home.abbr)} ${homePct}%">
+        <div class="wp-seg" style="width:${awayPct}%;background:${esc(away.primary)}"></div>
+        ${tiePct ? `<div class="wp-seg wp-tie" style="width:${tiePct}%"></div>` : ""}
+        <div class="wp-seg" style="width:${homePct}%;background:${esc(home.primary)}"></div>
+      </div>
+      <div class="wp-labels">
+        <span><b>${esc(away.abbr)}</b> ${awayPct}% win</span>
+        ${tiePct ? `<span class="wp-tie-label">tie ${tiePct}%</span>` : ""}
+        <span><b>${esc(home.abbr)}</b> ${homePct}% win</span>
+      </div>
+      <div class="pts-strips">
+        ${[[away, sa], [home, sh]].map(([t, s]) => `
+          <div class="pts-row">
+            <span class="pts-team">${esc(t.abbr)}</span>
+            <div class="qstrip" data-player="${esc(t.name)}" data-stat="Points"
+                 data-q="p10:${s.points.p10}|p25:${s.points.p10}|p50:${s.points.p50}|p75:${s.points.p90}|p90:${s.points.p90}"
+                 style="--p10:${pctOf(s.points.p10, 55)};--p25:${pctOf(s.points.p10, 55)};--p50:${pctOf(s.points.p50, 55)};--p75:${pctOf(s.points.p90, 55)};--p90:${pctOf(s.points.p90, 55)}">
+              <div class="track"></div><div class="band"></div><div class="median"></div>
+            </div>
+            <span class="pts-range">${s.points.p10}–${s.points.p90}</span>
+          </div>`).join("")}
+        <div class="pts-scale-note">floor p10 → ceiling p90, shared 0–55 pt scale</div>
+      </div>
+    </section>
+    <div class="teams-cols">
+      ${simTeamCol(away, sa)}
+      ${simTeamCol(home, sh)}
+    </div>`;
+}
+
+function pctOf(v, max) { return `${Math.min(100, (v / max) * 100).toFixed(1)}%`; }
+
+function simTeamCol(team, s) {
+  const downs = ["1", "2", "3", "4"];
+  const outcomeMeta = [
+    ["td", "TD"], ["fg", "FG"], ["punt", "Punt"], ["turnover", "TO"], ["downs", "4th ↓"],
+  ];
+  const passMean = s.pass_plays_mean, runMean = s.run_plays_mean;
+  const passPct = (passMean / (passMean + runMean)) * 100;
+  return `
+    <div>
+      <div class="team-col-head" style="--team-color:${esc(team.primary)}">
+        ${teamLogo(team)}<h3>${esc(team.name)}</h3>
+      </div>
+
+      <div class="sim-card">
+        <h4 class="sim-card-title">Play Calling <span class="sim-card-sub">${fmt(s.plays_mean, 0)} plays · ${fmt(s.drives_mean, 0)} drives</span></h4>
+        <div class="mix-legend">
+          <span><i class="swatch swatch-pass"></i>Pass ${fmt(passMean, 0)}</span>
+          <span><i class="swatch swatch-run"></i>Run ${fmt(runMean, 0)}</span>
+        </div>
+        <div class="mixbar" role="img" aria-label="Pass ${fmt(passMean,0)} plays, run ${fmt(runMean,0)} plays">
+          <div class="mix-pass" style="width:${passPct.toFixed(1)}%"></div>
+          <div class="mix-run" style="width:${(100 - passPct).toFixed(1)}%"></div>
+        </div>
+        <div class="downgrid">
+          ${downs.map((d) => {
+            const r = s.pass_rate_by_down[d];
+            return `
+              <div class="downcell">
+                <div class="down-label">${d}${["st","nd","rd","th"][d-1]} down</div>
+                <div class="downbar"><div class="mix-pass" style="width:${r == null ? 0 : (r * 100).toFixed(0)}%"></div></div>
+                <div class="down-val">${r == null ? "—" : Math.round(r * 100) + "% pass"}</div>
+              </div>`;
+          }).join("")}
+        </div>
+      </div>
+
+      <div class="sim-card">
+        <h4 class="sim-card-title">Drive Outcomes</h4>
+        <div class="outcome-chips">
+          ${outcomeMeta.map(([k, label]) =>
+            `<span class="chip">${label} ${Math.round((s.drive_outcomes[k] || 0) * 100)}%</span>`).join("")}
+        </div>
+      </div>
+
+      <div class="sim-card">
+        <h4 class="sim-card-title">Expected Snap Counts</h4>
+        ${s.players.map((p) => {
+          const maxSnaps = s.plays_mean;
+          return `
+          <div class="snap-row" data-tip="${esc(p.name)}: ${p.snaps_p10}–${p.snaps_p90} snaps · ${fmt(p.touches_mean)} touches · ${fmt(p.carries_mean)} car · ${fmt(p.targets_mean)} tgt">
+            <span class="pos-badge pos-${esc(p.position)}">${esc(p.position)}</span>
+            <span class="snap-name">${esc(p.name)}</span>
+            <div class="snapbar">
+              <div class="snap-fill" style="width:${Math.min(100, (p.snaps_mean / maxSnaps) * 100).toFixed(1)}%"></div>
+              <div class="snap-whisker" style="left:${Math.min(100, (p.snaps_p10 / maxSnaps) * 100).toFixed(1)}%;width:${Math.max(0, ((p.snaps_p90 - p.snaps_p10) / maxSnaps) * 100).toFixed(1)}%"></div>
+            </div>
+            <span class="snap-val">${fmt(p.snaps_mean, 0)} <em>${Math.round(p.snap_share * 100)}%</em></span>
+          </div>`;
+        }).join("")}
+        <div class="pts-scale-note">bar = mean snaps · whisker = p10–p90 · % of team plays</div>
+      </div>
+    </div>`;
 }
 
 function teamColumn(block) {
@@ -195,6 +329,20 @@ function bindStripTooltips() {
       let x = e.clientX + pad, y = e.clientY + pad;
       if (x + w > innerWidth - 8) x = e.clientX - w - pad;
       if (y + h > innerHeight - 8) y = e.clientY - h - pad;
+      tooltip.style.left = `${x}px`;
+      tooltip.style.top = `${y}px`;
+    });
+    el.addEventListener("mouseleave", () => { tooltip.hidden = true; });
+  });
+
+  view.querySelectorAll("[data-tip]").forEach((el) => {
+    el.addEventListener("mousemove", (e) => {
+      tooltip.innerHTML = `<div class="tt-title">${esc(el.dataset.tip)}</div>`;
+      tooltip.hidden = false;
+      const pad = 14;
+      let x = e.clientX + pad, y = e.clientY + pad;
+      if (x + tooltip.offsetWidth > innerWidth - 8) x = e.clientX - tooltip.offsetWidth - pad;
+      if (y + tooltip.offsetHeight > innerHeight - 8) y = e.clientY - tooltip.offsetHeight - pad;
       tooltip.style.left = `${x}px`;
       tooltip.style.top = `${y}px`;
     });

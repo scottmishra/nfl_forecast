@@ -121,6 +121,27 @@ def game_detail(game_id: str):
     })
 
 
+@lru_cache(maxsize=1)
+def _load_sims() -> dict:
+    path = FORECASTS_DIR / "latest_sims.json"
+    if not path.exists():
+        return {}
+    import json
+
+    return json.loads(path.read_text())
+
+
+@app.get("/api/game/{game_id}/sim")
+def game_sim(game_id: str):
+    sims = _load_sims()
+    if game_id not in sims:
+        raise HTTPException(
+            status_code=404,
+            detail="No simulation for this game — rerun the pipeline with --sims > 0.",
+        )
+    return sims[game_id]
+
+
 @app.get("/api/players")
 def players(q: str = ""):
     forecasts, _ = _load()

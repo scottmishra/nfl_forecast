@@ -33,7 +33,7 @@ def load_data(source: str = "nflverse", seasons: list[int] | None = None):
 
 def run(source: str = "nflverse", seasons: list[int] | None = None,
         buzz_provider: str = "neutral", engine: str = "gbm",
-        live_weather: bool = False) -> pd.DataFrame:
+        live_weather: bool = False, n_sims: int = 500) -> pd.DataFrame:
     """Train on history, forecast the upcoming slate, persist artifacts."""
     ensure_dirs()
     log.info("loading data (source=%s)", source)
@@ -81,6 +81,12 @@ def run(source: str = "nflverse", seasons: list[int] | None = None,
     result.to_parquet(FORECASTS_DIR / "latest_forecasts.parquet", index=False)
     slate.to_parquet(FORECASTS_DIR / "latest_slate.parquet", index=False)
     log.info("wrote %d player forecasts across %d games", len(result), len(slate))
+
+    if n_sims > 0:
+        from gameday.sim.run import simulate_slate
+
+        log.info("running game simulations (%d replicates/game)", n_sims)
+        simulate_slate(player_weeks, games, n_sims=n_sims)
     return result
 
 

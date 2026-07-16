@@ -53,6 +53,21 @@ temporal architecture (PatchTST / TFT via `neuralforecast` or
 `pytorch-forecasting`) is a drop-in replacement if you want sequence modeling
 over raw game logs.
 
+**Game simulation — discrete-event engine (`gameday/sim/`).** Beyond stat
+lines, every matchup is simulated play-by-play N times (default 500): game
+state is (quarter, clock, down, distance, field position, score, possession);
+a situational play-calling policy (league curves + each team's calibrated
+lean) picks pass/run/FG/punt/go-for-it; calibrated distributions resolve
+outcomes; a pace-aware clock model advances time, with hurry-up and
+clock-milking behavior. Team profiles (pace, pass rate, efficiency, defensive
+adjustments, player usage shares and personnel snap weights) are estimated
+from each team's trailing 8 games with shrinkage toward league means.
+Aggregates per game: win probability, score distributions, expected play
+calls by down, drive-outcome shares, and per-player expected snap counts /
+touches with p10–p90 ranges. Simplifications by design: no penalties,
+2-point tries, or onside kicks (structural outputs — play mix, snaps, win
+prob — are robust to these). Tune depth with `--sims N` (0 disables).
+
 **Leakage discipline.** Every rolling feature is shifted one game — a row
 only ever sees information available before kickoff. Tests assert this
 (`tests/test_features.py::test_features_no_leakage`).
@@ -79,6 +94,9 @@ gameday forecast --buzz reddit
 - **Matchup view** — team-color hero banner, then every player as a card of
   quantile strips: p10–p90 track, p25–p75 band, white median tick, hover
   tooltip with the full five-number summary
+- **Simulation tab** — projected median score, win-probability bar, points
+  floor/ceiling strips, pass/run mix by down, drive-outcome shares, and
+  expected snap counts per player with p10–p90 whiskers
 - **Player search** — jump straight to any player's matchup
 
 No build step: it's a hand-rolled SPA (vanilla JS + CSS) served by FastAPI.
@@ -91,6 +109,7 @@ dark surface; identity is never encoded by color alone.
 |---|---|
 | `GET /api/slate` | upcoming games + venue/weather + headliners |
 | `GET /api/game/{game_id}` | both teams' full player forecasts |
+| `GET /api/game/{game_id}/sim` | Monte Carlo aggregates: win prob, play calls, snaps |
 | `GET /api/players?q=` | player search across the slate |
 | `GET /api/health` | liveness |
 
@@ -111,6 +130,10 @@ gameday/
   models/
     quantile_gbm.py  LightGBM quantile ensemble (primary)
     neural.py        torch multi-quantile MLP (optional GPU path)
+  sim/
+    calibrate.py     team profiles: pace, tendencies, efficiency, personnel
+    engine.py        discrete-event play-by-play simulator
+    run.py           Monte Carlo runner + slate aggregation
   api/server.py    FastAPI backend + static dashboard
 web/               the dashboard (index.html / styles.css / app.js)
 tests/             feature-leakage, quantile-sanity, end-to-end pipeline

@@ -19,11 +19,14 @@ app = typer.Typer(help="NFL game-day forecaster", no_args_is_help=True)
 
 
 @app.command()
-def demo(engine: str = typer.Option("gbm", help="gbm | neural")):
+def demo(
+    engine: str = typer.Option("gbm", help="gbm | neural"),
+    sims: int = typer.Option(500, help="game-sim replicates per matchup (0 disables)"),
+):
     """Generate synthetic seasons, train, and forecast — no network needed."""
     from gameday import pipeline
 
-    pipeline.run(source="demo", engine=engine)
+    pipeline.run(source="demo", engine=engine, n_sims=sims)
     typer.echo("Demo artifacts written. Run `gameday serve` and open http://localhost:8000")
 
 
@@ -33,13 +36,14 @@ def forecast(
     engine: str = typer.Option("gbm", help="gbm | neural"),
     buzz: str = typer.Option("neutral", help="buzz provider: neutral | reddit"),
     live_weather: bool = typer.Option(True, help="pull Open-Meteo forecasts for the slate"),
+    sims: int = typer.Option(500, help="game-sim replicates per matchup (0 disables)"),
 ):
     """Full pipeline against real nflverse data."""
     from gameday import pipeline
 
     season_list = [int(s) for s in seasons.split(",") if s] or settings.seasons
     pipeline.run(source="nflverse", seasons=season_list, engine=engine,
-                 buzz_provider=buzz, live_weather=live_weather)
+                 buzz_provider=buzz, live_weather=live_weather, n_sims=sims)
 
 
 @app.command()
