@@ -8,7 +8,8 @@ dist/
 venv/
 .pytest_cache/
 .ruff_cache/
-data/
+# root-anchored: only the top-level runtime cache dir, NOT gameday/data/
+/data/
 *.duckdb
 
 # artifacts are regenerable — except the three small demo serving files the
