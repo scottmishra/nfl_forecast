@@ -20,8 +20,19 @@ public releases (the same source `nfl_data_py` wraps).
 
 ```bash
 pip install -e .            # core (CPU) install
+gameday serve               # open http://localhost:8000 — works immediately
+```
+
+The repo ships with pre-built demo forecasts (`artifacts/forecasts/`, ~200KB:
+a synthetic 16-game slate with quantile forecasts and game sims), so the
+dashboard works straight after cloning. Everything else under `data/` and
+`artifacts/` — raw data caches, trained model files — is regenerable and
+git-ignored.
+
+To regenerate from scratch (overwrites the shipped artifacts):
+
+```bash
 gameday demo                # synthetic league, trains + forecasts offline
-gameday serve               # open http://localhost:8000
 ```
 
 `gameday demo` needs **no network at all** — it generates three synthetic

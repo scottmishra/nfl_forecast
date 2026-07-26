@@ -9,8 +9,15 @@ venv/
 .pytest_cache/
 .ruff_cache/
 data/
-artifacts/
-*.parquet
 *.duckdb
+
+# artifacts are regenerable — except the three small demo serving files the
+# dashboard reads, committed so a fresh clone works without running the pipeline
+artifacts/*
+!artifacts/forecasts
+artifacts/forecasts/*
+!artifacts/forecasts/latest_forecasts.parquet
+!artifacts/forecasts/latest_slate.parquet
+!artifacts/forecasts/latest_sims.json
 .env
 .DS_Store
