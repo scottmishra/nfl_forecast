@@ -16,6 +16,7 @@ import httpx
 import pandas as pd
 
 from gameday.config import RAW_DIR, ensure_dirs
+from gameday.data.teams import normalize_team
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ def fetch_rosters(seasons: list[int], force: bool = False) -> pd.DataFrame:
     df = df[df["gsis_id"].notna()]  # a rare row has a null id; it can't join
     if "birth_date" in df.columns:  # date-typed in rosters, str in players — normalize
         df["birth_date"] = pd.to_datetime(df["birth_date"], errors="coerce")
+    if "team" in df.columns:
+        df["team"] = df["team"].map(normalize_team)
     # Collapse to one row per (player, season) — the season file is already
     # ~one-per-player, but guard against any weekly duplicates.
     df = (

@@ -46,6 +46,16 @@ TEAMS: dict[str, dict] = {
 }
 
 
+# nflverse uses a few abbreviations that differ from our canonical codes
+# (e.g. "LA" for the Rams in older + 2026 data, historical relocations).
+TEAM_ALIASES = {"LA": "LAR", "STL": "LAR", "SD": "LAC", "OAK": "LV", "WSH": "WAS"}
+
+
+def normalize_team(abbr):
+    """Map an nflverse team code to our canonical TEAMS key (passthrough if unknown)."""
+    return TEAM_ALIASES.get(abbr, abbr)
+
+
 def travel_km(home: str, away: str) -> float:
     """Great-circle distance the away team travels, in km."""
     a, b = TEAMS[home], TEAMS[away]

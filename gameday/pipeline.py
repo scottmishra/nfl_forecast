@@ -38,6 +38,8 @@ def run(source: str = "nflverse", seasons: list[int] | None = None,
     ensure_dirs()
     log.info("loading data (source=%s)", source)
     player_weeks, games = load_data(source, seasons)
+    if source != "demo":
+        games = _next_week_slate(games)
     roster_df = None if source == "demo" else rosters.fetch_rosters(seasons or settings.seasons)
 
     if live_weather:
@@ -76,8 +78,8 @@ def run(source: str = "nflverse", seasons: list[int] | None = None,
 
     result = pd.concat(forecasts, ignore_index=True)
     slate = games[games["home_score"].isna()].copy()
-    slate["stadium"] = slate["home_team"].map(lambda t: TEAMS[t]["stadium"])
-    slate["city"] = slate["home_team"].map(lambda t: TEAMS[t]["city"])
+    slate["stadium"] = slate["home_team"].map(lambda t: TEAMS.get(t, {}).get("stadium"))
+    slate["city"] = slate["home_team"].map(lambda t: TEAMS.get(t, {}).get("city"))
 
     result.to_parquet(FORECASTS_DIR / "latest_forecasts.parquet", index=False)
     slate.to_parquet(FORECASTS_DIR / "latest_slate.parquet", index=False)
@@ -89,6 +91,19 @@ def run(source: str = "nflverse", seasons: list[int] | None = None,
         log.info("running game simulations (%d replicates/game)", n_sims)
         simulate_slate(player_weeks, games, n_sims=n_sims)
     return result
+
+
+def _next_week_slate(games: pd.DataFrame) -> pd.DataFrame:
+    """Restrict the live slate to the next unplayed week only — keep every played
+    game (for form/opponent context) but drop upcoming weeks beyond the earliest,
+    so the dashboard shows one week rather than the whole remaining schedule."""
+    upcoming = games[games["home_score"].isna()]
+    if upcoming.empty:
+        return games
+    nxt = upcoming.sort_values(["season", "week"]).iloc[0]
+    keep = games["home_score"].notna() | (
+        (games["season"] == nxt["season"]) & (games["week"] == nxt["week"]))
+    return games[keep].reset_index(drop=True)
 
 
 def _refresh_upcoming_weather(games: pd.DataFrame) -> pd.DataFrame:
