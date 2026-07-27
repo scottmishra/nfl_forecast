@@ -18,6 +18,16 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 app = typer.Typer(help="NFL game-day forecaster", no_args_is_help=True)
 
 
+def _parse_weeks(weeks: str) -> list[int] | None:
+    """Parse a weeks option: '1-8' -> [1..8], '1,3,5' -> [1,3,5], '' -> None."""
+    if not weeks:
+        return None
+    if "-" in weeks:
+        lo, hi = weeks.split("-")
+        return list(range(int(lo), int(hi) + 1))
+    return [int(w) for w in weeks.split(",")]
+
+
 @app.command()
 def demo(
     engine: str = typer.Option("gbm", help="gbm | neural"),
@@ -59,19 +69,41 @@ def backtest(
     from gameday import backtest as bt
 
     season_list = [int(s) for s in seasons.split(",") if s] or None
-    week_list: list[int] | None = None
-    if weeks:
-        if "-" in weeks:
-            lo, hi = weeks.split("-")
-            week_list = list(range(int(lo), int(hi) + 1))
-        else:
-            week_list = [int(w) for w in weeks.split(",")]
+    week_list = _parse_weeks(weeks)
 
     report = bt.run_backtest(
         source=source, seasons=season_list,
         test_season=test_season or None, weeks=week_list,
         n_sims=sims, engine=engine,
     )
+    typer.echo(bt.format_report(report))
+
+
+@app.command()
+def replay(
+    season: int = typer.Option(0, help="season to replay (default: latest played)"),
+    seasons: str = typer.Option("", help="history to train on, e.g. 2019,2020,...,2024 (default: config seasons)"),
+    weeks: str = typer.Option("", help="weeks to replay, e.g. 1-8 or 1,3,5 (default: all)"),
+    engine: str = typer.Option("gbm", help="gbm | neural"),
+    sims: int = typer.Option(0, help="game-sim replicates per historical game (0 = skip sims, faster)"),
+    compare: bool = typer.Option(True, help="also score WITHOUT the season-to-season adjustments (before/after)"),
+):
+    """Historical replay + season-to-season validation.
+
+    Replays a past season out-of-sample and writes per-player forecast-vs-actual
+    rows and a scenario scorecard to artifacts/replay/{season} for the dashboard
+    Replay view. With --compare it also scores the model without the
+    season-to-season adjustment features, so the scorecard shows the lift.
+    """
+    from gameday import backtest as bt
+
+    hist = [int(s) for s in seasons.split(",") if s] or None
+    report = bt.run_backtest(
+        source="nflverse", seasons=hist, test_season=season or None,
+        weeks=_parse_weeks(weeks), n_sims=sims, engine=engine,
+        compare=compare, persist_replay=True,
+    )
+    typer.echo(bt.format_scorecard(report))
     typer.echo(bt.format_report(report))
 
 

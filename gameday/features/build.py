@@ -31,30 +31,55 @@ log = logging.getLogger(__name__)
 USAGE_COLS = ["attempts", "carries", "targets"]
 
 
-def _upcoming_scaffold(player_weeks: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
-    """Rows for players in not-yet-played games, based on each team's most
-    recent roster (players seen in that team's last 4 played weeks)."""
+def _recent_roster(player_weeks: pd.DataFrame, team: str) -> list[tuple]:
+    """(player_id, name, position) for players in a team's last 4 played weeks."""
+    hist = player_weeks[player_weeks["team"] == team]
+    if hist.empty:
+        return []
+    recent_weeks = (
+        hist[["season", "week"]].drop_duplicates()
+        .sort_values(["season", "week"]).tail(4)
+    )
+    roster = hist.merge(recent_weeks, on=["season", "week"])
+    roster = roster.sort_values(["season", "week"]).groupby("player_id").tail(1)
+    return [(p.player_id, p.player_display_name, p.position) for _, p in roster.iterrows()]
+
+
+def _upcoming_scaffold(player_weeks: pd.DataFrame, games: pd.DataFrame,
+                       current_rosters: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Rows for players in not-yet-played games.
+
+    Normally each team's roster is taken from its last 4 played weeks. For a
+    season *opener* (the team has no games played yet that season), if a current
+    roster is supplied we scaffold from the actual current-season roster instead,
+    so offseason signings and rookies appear rather than last year's departed
+    players."""
     upcoming = games[games["home_score"].isna()]
     if upcoming.empty:
         return pd.DataFrame()
 
+    cr = current_rosters if current_rosters is not None else pd.DataFrame()
+    if not cr.empty and {"gsis_id", "position", "team", "season"}.issubset(cr.columns):
+        cr = cr[cr["position"].isin(["QB", "RB", "WR", "TE"])]
+    else:
+        cr = pd.DataFrame()  # not enough to scaffold openers from; use recent form
+
     rows = []
     for _, g in upcoming.iterrows():
+        season, week = int(g.season), int(g.week)
         for team, opp in ((g.home_team, g.away_team), (g.away_team, g.home_team)):
-            hist = player_weeks[player_weeks["team"] == team]
-            if hist.empty:
-                continue
-            recent_weeks = (
-                hist[["season", "week"]].drop_duplicates()
-                .sort_values(["season", "week"]).tail(4)
-            )
-            roster = hist.merge(recent_weeks, on=["season", "week"])
-            roster = roster.sort_values(["season", "week"]).groupby("player_id").tail(1)
-            for _, p in roster.iterrows():
+            team_played = bool(
+                ((player_weeks["team"] == team) & (player_weeks["season"] == season)).any())
+            team_roster = cr[(cr["team"] == team) & (cr["season"] == season)] if not cr.empty else cr
+            if not team_played and not team_roster.empty:
+                players = [(p.gsis_id, p.get("full_name") or p.gsis_id, p.position)
+                           for _, p in team_roster.iterrows() if pd.notna(p.gsis_id)]
+            else:
+                players = _recent_roster(player_weeks, team)
+            for pid, name, pos in players:
                 rows.append(dict(
-                    player_id=p.player_id, player_display_name=p.player_display_name,
-                    position=p.position, team=team, season=int(g.season), week=int(g.week),
-                    opponent_team=opp,
+                    player_id=pid, player_display_name=name, position=pos,
+                    team=team, season=season, week=week, opponent_team=opp,
                 ))
     return pd.DataFrame(rows)
 
@@ -87,11 +112,12 @@ def build_features(
     player_weeks: pd.DataFrame,
     games: pd.DataFrame,
     buzz_provider: str = "neutral",
+    rosters: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Return the full feature matrix (historical rows + upcoming-slate rows)."""
     all_stats = sorted({s for stats in POSITION_STATS.values() for s in stats})
 
-    scaffold = _upcoming_scaffold(player_weeks, games)
+    scaffold = _upcoming_scaffold(player_weeks, games, current_rosters=rosters)
     df = pd.concat([player_weeks, scaffold], ignore_index=True)
     df = df.sort_values(["player_id", "season", "week"]).reset_index(drop=True)
 
@@ -167,11 +193,61 @@ def build_features(
         df.loc[upcoming_mask, "buzz"] = provider(target, season, week).values
 
     df["rest"] = pd.to_numeric(df["rest"], errors="coerce").fillna(7)
+
+    # --- season-to-season player adjustments (experience/age/draft/team) -----
+    df = _add_roster_features(df, rosters)
     return df
 
 
-def feature_columns(position: str, df: pd.DataFrame) -> list[str]:
-    """Model inputs for a position: its stat-form columns + shared context."""
+# Season-to-season adjustment features (joined from nflverse rosters).
+ADJUSTMENT_COLS = ["years_exp", "age", "is_rookie", "draft_number", "is_new_team"]
+
+
+def _add_roster_features(df: pd.DataFrame, rosters: pd.DataFrame | None) -> pd.DataFrame:
+    """Attach per-(player, season) experience/age/draft/team-change columns.
+
+    Joined on player_id == roster gsis_id + season. All values are known before
+    kickoff, so they are leakage-safe. When rosters are unavailable (demo/tests,
+    or a synthetic league whose ids don't match), fills neutral constants so the
+    columns still exist and simply contribute no signal."""
+    if rosters is None or rosters.empty:
+        df["years_exp"] = 4.0
+        df["age"] = 26.0
+        df["is_rookie"] = 0
+        df["draft_number"] = 130.0
+        df["is_new_team"] = 0
+        return df
+
+    r = rosters.sort_values(["gsis_id", "season"]).copy()
+    r["prev_team"] = r.groupby("gsis_id")["team"].shift(1)
+    r["is_new_team"] = ((r["prev_team"].notna()) & (r["team"] != r["prev_team"])).astype(int)
+    r["age"] = r["season"] - pd.to_datetime(r["birth_date"], errors="coerce").dt.year
+    r["is_rookie"] = (
+        (pd.to_numeric(r["years_exp"], errors="coerce").fillna(0) == 0)
+        | (r["rookie_year"] == r["season"])
+    ).astype(int)
+    r["draft_number"] = pd.to_numeric(r["draft_number"], errors="coerce")
+    feat = r[["gsis_id", "season", "years_exp", "age", "is_rookie",
+              "draft_number", "is_new_team"]].rename(columns={"gsis_id": "player_id"})
+
+    df = df.merge(feat, on=["player_id", "season"], how="left")
+
+    # Players with no roster row (or unmatched ids): sensible defaults.
+    df["is_rookie"] = df["is_rookie"].fillna(0).astype(int)
+    df["is_new_team"] = df["is_new_team"].fillna(0).astype(int)
+    df["draft_number"] = pd.to_numeric(df["draft_number"], errors="coerce").fillna(260.0)
+    for c in ("years_exp", "age"):
+        med = pd.to_numeric(df[c], errors="coerce").median()
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(med if pd.notna(med) else 0.0)
+    return df
+
+
+def feature_columns(position: str, df: pd.DataFrame,
+                    include_adjustments: bool = True) -> list[str]:
+    """Model inputs for a position: its stat-form columns + shared context.
+
+    `include_adjustments` toggles the season-to-season roster features so the
+    replay harness can score the model with and without them (before/after)."""
     stats = POSITION_STATS[position]
     cols: list[str] = []
     for stat in stats + USAGE_COLS:
@@ -184,4 +260,6 @@ def feature_columns(position: str, df: pd.DataFrame) -> list[str]:
         "indoor", "temp_c", "wind_kph", "week",
         "team_pts_r8", "def_pts_allowed_r8", "def_vs_pos_r8", "buzz",
     ]
+    if include_adjustments:
+        cols += ADJUSTMENT_COLS
     return [c for c in dict.fromkeys(cols) if c in df.columns]

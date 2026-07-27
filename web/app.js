@@ -282,11 +282,14 @@ function teamColumn(block) {
 }
 
 function playerCard(p) {
+  const tag = p.is_rookie ? `<span class="ptag ptag-rookie">Rookie</span>`
+    : p.is_new_team ? `<span class="ptag ptag-new">New team</span>` : "";
   return `
-    <article class="player-card">
+    <article class="player-card" data-player-id="${esc(p.player_id)}">
       <div class="player-head">
         <span class="pos-badge pos-${esc(p.position)}">${esc(p.position)}</span>
         <span class="player-name">${esc(p.name)}</span>
+        ${tag}
         <span class="player-sub">${p.is_home ? "vs" : "@"} ${esc(p.opponent)}</span>
       </div>
       ${p.forecasts.map((f) => statRow(p, f)).join("")}
@@ -295,20 +298,29 @@ function playerCard(p) {
 
 function statRow(p, f) {
   // Scale the strip to the p90 ceiling of this row (own scale per stat).
-  const max = Math.max(f.p90 * 1.08, 1e-6);
+  // In replay mode f.actual is present — widen the scale so the marker fits.
+  const hasActual = f.actual != null;
+  const max = Math.max(f.p90 * 1.08, hasActual ? f.actual * 1.08 : 0, 1e-6);
   const pct = (v) => `${Math.min(100, (v / max) * 100).toFixed(1)}%`;
   const data = QS.map((q) => `${q}:${f[q]}`).join("|");
+  const actualMark = hasActual
+    ? `<div class="actual" style="left:${pct(f.actual)}"></div>` : "";
+  const actualAttr = hasActual ? ` data-actual="${f.actual}"` : "";
+  const p50cell = hasActual
+    ? `<div class="stat-p50">${fmt(f.p50)}<span class="sp-act">${fmt(f.actual)}</span></div>`
+    : `<div class="stat-p50">${fmt(f.p50)}</div>`;
   return `
     <div class="stat-row">
       <div class="stat-label">${esc(STAT_LABELS[f.stat] || f.stat)}</div>
-      <div class="qstrip" data-q="${esc(data)}" data-stat="${esc(STAT_LABELS[f.stat] || f.stat)}"
-           data-player="${esc(p.name)}"
+      <div class="qstrip${hasActual ? " has-actual" : ""}" data-q="${esc(data)}"
+           data-stat="${esc(STAT_LABELS[f.stat] || f.stat)}" data-player="${esc(p.name)}"${actualAttr}
            style="--p10:${pct(f.p10)};--p25:${pct(f.p25)};--p50:${pct(f.p50)};--p75:${pct(f.p75)};--p90:${pct(f.p90)}">
         <div class="track"></div>
         <div class="band"></div>
         <div class="median"></div>
+        ${actualMark}
       </div>
-      <div class="stat-p50">${fmt(f.p50)}</div>
+      ${p50cell}
     </div>`;
 }
 
@@ -318,11 +330,13 @@ function bindStripTooltips() {
   view.querySelectorAll(".qstrip").forEach((el) => {
     el.addEventListener("mousemove", (e) => {
       const vals = Object.fromEntries(el.dataset.q.split("|").map((kv) => kv.split(":")));
+      const actualRow = el.dataset.actual != null
+        ? `<tr class="tt-actual"><td>Actual</td><td>${fmt(Number(el.dataset.actual))}</td></tr>` : "";
       tooltip.innerHTML = `
         <div class="tt-title">${esc(el.dataset.player)} — ${esc(el.dataset.stat)}</div>
         <table>${QS.map((q) =>
           `<tr><td>${Q_NAMES[q]}</td><td>${fmt(Number(vals[q]))}</td></tr>`).join("")}
-        </table>`;
+        ${actualRow}</table>`;
       tooltip.hidden = false;
       const pad = 14;
       const w = tooltip.offsetWidth, h = tooltip.offsetHeight;
@@ -394,6 +408,162 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest(".search-wrap")) searchResults.hidden = true;
 });
 
+/* ---------- historical replay ---------- */
+
+function skillPct(m) {
+  if (!m || m.skill_vs_naive == null) return "—";
+  return `${m.skill_vs_naive >= 0 ? "+" : ""}${(m.skill_vs_naive * 100).toFixed(1)}%`;
+}
+
+function scorecardPanel(sc) {
+  const adj = sc.adjusted, base = sc.baseline || null;
+  const rows = [];
+  const push = (label, a, b) => {
+    const delta = (a && b && a.skill_vs_naive != null && b.skill_vs_naive != null)
+      ? a.skill_vs_naive - b.skill_vs_naive : null;
+    rows.push(`
+      <tr>
+        <td class="sc-seg">${esc(label)}</td>
+        <td class="sc-n">${a ? a.n : "—"}</td>
+        <td class="sc-mae">${a ? fmt(a.mae_p50) : "—"}</td>
+        <td class="sc-skill ${a && a.skill_vs_naive >= 0 ? "pos" : "neg"}">${skillPct(a)}</td>
+        ${base ? `<td class="sc-base">${skillPct(b)}</td>
+        <td class="sc-delta ${delta > 0 ? "pos" : delta < 0 ? "neg" : ""}">${
+          delta != null ? `${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(1)}%` : "—"}</td>` : ""}
+      </tr>`);
+  };
+  push("Overall", adj.overall, base && base.overall);
+  for (const [gkey, gname] of [["phase", "Season phase"], ["experience", "Experience"], ["team", "Team"]]) {
+    const aseg = adj.segments[gkey] || {}, bseg = base ? (base.segments[gkey] || {}) : {};
+    rows.push(`<tr class="sc-grouphead"><td colspan="${base ? 6 : 4}">${gname}</td></tr>`);
+    for (const label of Object.keys(aseg)) push(label, aseg[label], bseg[label]);
+  }
+  return `
+    <section class="scorecard">
+      <div class="sc-title">Season-to-Season Scorecard
+        <span class="sc-sub">fantasy points · skill vs naive trailing-8${base ? " · adjusted vs no-adjustments" : ""}</span>
+      </div>
+      <div class="sc-table-wrap"><table class="sc-table">
+        <thead><tr><th>Segment</th><th>n</th><th>MAE</th><th>Skill</th>${
+          base ? "<th>Base</th><th>Δ</th>" : ""}</tr></thead>
+        <tbody>${rows.join("")}</tbody>
+      </table></div>
+    </section>`;
+}
+
+function replayGameBlock(g) {
+  const away = g.away, home = g.home;
+  return `
+    <section class="replay-game">
+      <div class="replay-game-head">${away ? esc(away.team.abbr) : "?"} <span>@</span> ${home ? esc(home.team.abbr) : "?"}</div>
+      <div class="teams-cols">
+        ${away ? teamColumn(away) : ""}
+        ${home ? teamColumn(home) : ""}
+      </div>
+    </section>`;
+}
+
+function replaySetup() {
+  view.innerHTML = `
+    <div class="error-box">
+      <h2 style="margin-bottom:12px">No replay data yet</h2>
+      <p>Generate a historical replay first:</p>
+      <p style="margin-top:10px"><code>gameday replay --season 2024 --compare</code></p>
+      <p style="margin-top:10px">then refresh this page.</p>
+    </div>`;
+}
+
+async function renderReplay(season, week) {
+  view.innerHTML = `<div class="loading"><div class="spinner"></div><p>Loading the replay…</p></div>`;
+  let seasonsData;
+  try {
+    seasonsData = await api("/api/replay/seasons");
+  } catch (err) {
+    return renderError(err);
+  }
+  const seasons = seasonsData.seasons || [];
+  if (!seasons.length) return replaySetup();
+
+  season = seasons.some((s) => s.season === Number(season)) ? Number(season) : seasons[0].season;
+  const weeks = seasons.find((s) => s.season === season).weeks;
+  week = weeks.includes(Number(week)) ? Number(week) : weeks[0];
+
+  let scorecard, weekData;
+  try {
+    [scorecard, weekData] = await Promise.all([
+      api(`/api/replay/${season}/scorecard`).catch(() => null),
+      api(`/api/replay/${season}/${week}`),
+    ]);
+  } catch (err) {
+    return renderError(err);
+  }
+  weekPill.textContent = `Replay · ${season} · Wk ${week}`;
+
+  view.innerHTML = `
+    <div class="replay-bar">
+      <div class="section-title" style="margin:0">Historical Replay</div>
+      <div class="picker-group">
+        <label>Season
+          <select id="rp-season">${seasons.map((s) =>
+            `<option value="${s.season}" ${s.season === season ? "selected" : ""}>${s.season}</option>`).join("")}</select>
+        </label>
+        <label>Week
+          <select id="rp-week">${weeks.map((w) =>
+            `<option value="${w}" ${w === week ? "selected" : ""}>Week ${w}</option>`).join("")}</select>
+        </label>
+      </div>
+    </div>
+    ${scorecard ? scorecardPanel(scorecard) : ""}
+    <div class="section-title">Week ${week} — forecast vs actual · ${weekData.games.length} games</div>
+    <div class="replay-games">${weekData.games.map(replayGameBlock).join("")}</div>`;
+
+  document.getElementById("rp-season").addEventListener("change", (e) => {
+    location.hash = `#replay/${e.target.value}`;   // reset to the season's first week
+  });
+  document.getElementById("rp-week").addEventListener("change", (e) => {
+    location.hash = `#replay/${season}/${e.target.value}`;
+  });
+  view.querySelectorAll(".player-card[data-player-id]").forEach((el) => {
+    el.classList.add("clickable");
+    el.addEventListener("click", () => {
+      location.hash = `#replay/${season}/${week}/player/${encodeURIComponent(el.dataset.playerId)}`;
+    });
+  });
+  bindStripTooltips();
+}
+
+async function renderReplayPlayer(season, week, playerId) {
+  view.innerHTML = `<div class="loading"><div class="spinner"></div><p>Loading player…</p></div>`;
+  let p;
+  try {
+    p = await api(`/api/replay/${season}/${week}/player/${encodeURIComponent(playerId)}`);
+  } catch (err) {
+    return renderError(err);
+  }
+  weekPill.textContent = `Replay · ${season} · Wk ${week}`;
+  const tags = [
+    p.is_rookie ? "Rookie" : p.is_new_team ? "New team" : null,
+    p.years_exp != null ? `${Math.round(p.years_exp)} yr exp` : null,
+    p.age != null ? `age ${Math.round(p.age)}` : null,
+  ].filter(Boolean).join(" · ");
+  view.innerHTML = `
+    <button class="back-btn" id="back">← Week ${week}</button>
+    <section class="player-detail">
+      <div class="player-head">
+        <span class="pos-badge pos-${esc(p.position)}">${esc(p.position)}</span>
+        <span class="player-name" style="font-size:22px">${esc(p.name)}</span>
+        <span class="player-sub">${p.is_home ? "vs" : "@"} ${esc(p.opponent)}</span>
+      </div>
+      <div class="pd-sub">${esc(p.team)} · ${season} Week ${week}${tags ? ` · ${esc(tags)}` : ""}</div>
+      <div class="pd-stats">${p.forecasts.map((f) => statRow(p, f)).join("")}</div>
+      <div class="pts-scale-note">gold marker = actual result · white tick = forecast median · bar = p10–p90</div>
+    </section>`;
+  document.getElementById("back").addEventListener("click", () => {
+    location.hash = `#replay/${season}/${week}`;
+  });
+  bindStripTooltips();
+}
+
 /* ---------- errors & routing ---------- */
 
 function renderError(err) {
@@ -410,10 +580,25 @@ function renderError(err) {
     </div>`;
 }
 
+function updateNav() {
+  const isReplay = location.hash.startsWith("#replay");
+  document.getElementById("nav-slate")?.classList.toggle("active", !isReplay);
+  document.getElementById("nav-replay")?.classList.toggle("active", isReplay);
+}
+
 function route() {
-  const m = location.hash.match(/^#game\/(.+)$/);
-  if (m) renderGame(decodeURIComponent(m[1]));
-  else renderSlate();
+  const h = location.hash;
+  let m;
+  if ((m = h.match(/^#replay\/(\d+)\/(\d+)\/player\/(.+)$/))) {
+    renderReplayPlayer(Number(m[1]), Number(m[2]), decodeURIComponent(m[3]));
+  } else if ((m = h.match(/^#replay(?:\/(\d+))?(?:\/(\d+))?$/))) {
+    renderReplay(m[1] ? Number(m[1]) : null, m[2] ? Number(m[2]) : null);
+  } else if ((m = h.match(/^#game\/(.+)$/))) {
+    renderGame(decodeURIComponent(m[1]));
+  } else {
+    renderSlate();
+  }
+  updateNav();
 }
 
 document.getElementById("brand-link").addEventListener("click", (e) => {

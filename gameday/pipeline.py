@@ -16,7 +16,7 @@ import pandas as pd
 from gameday.config import (FEATURES_DIR, FORECASTS_DIR, POSITIONS, RAW_DIR,
                             ensure_dirs, settings)
 from gameday.data import demo as demo_data
-from gameday.data import nflverse, weather
+from gameday.data import nflverse, rosters, weather
 from gameday.data.teams import TEAMS
 from gameday.features.build import build_features, feature_columns
 from gameday.models import quantile_gbm
@@ -38,12 +38,13 @@ def run(source: str = "nflverse", seasons: list[int] | None = None,
     ensure_dirs()
     log.info("loading data (source=%s)", source)
     player_weeks, games = load_data(source, seasons)
+    roster_df = None if source == "demo" else rosters.fetch_rosters(seasons or settings.seasons)
 
     if live_weather:
         games = _refresh_upcoming_weather(games)
 
     log.info("building features (%d player-weeks)", len(player_weeks))
-    feats = build_features(player_weeks, games, buzz_provider=buzz_provider)
+    feats = build_features(player_weeks, games, buzz_provider=buzz_provider, rosters=roster_df)
     feats.to_parquet(FEATURES_DIR / "features.parquet", index=False)
 
     if engine == "neural":

@@ -9,29 +9,35 @@ Endpoints:
 
 from __future__ import annotations
 
+import json
 import math
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from gameday.config import FORECASTS_DIR, POSITION_STATS, QUANTILES, ROOT
+from gameday.config import (ARTIFACTS_DIR, FORECASTS_DIR, POSITION_STATS,
+                            QUANTILES, ROOT)
 from gameday.data.teams import TEAMS
 
 app = FastAPI(title="Gameday Forecaster", version="0.1.0")
 
 WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
+REPLAY_DIR = ARTIFACTS_DIR / "replay"
 
 
 def _clean(obj):
-    """Recursively convert NaN -> None for JSON."""
+    """Recursively convert numpy scalars to native Python and NaN -> None for JSON."""
     if isinstance(obj, dict):
         return {k: _clean(v) for k, v in obj.items()}
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple)):
         return [_clean(v) for v in obj]
+    if isinstance(obj, np.generic):  # numpy int/float/bool scalar -> python scalar
+        obj = obj.item()
     if isinstance(obj, float) and math.isnan(obj):
         return None
     return obj
@@ -155,6 +161,106 @@ def players(q: str = ""):
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# historical replay — forecast-vs-actual for a past season (artifacts/replay)
+# --------------------------------------------------------------------------
+
+@lru_cache(maxsize=8)
+def _load_replay(season: int) -> pd.DataFrame:
+    path = REPLAY_DIR / str(season) / "players.parquet"
+    if not path.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"No replay for {season} yet — run `gameday replay --season {season}`.",
+        )
+    return pd.read_parquet(path)
+
+
+def _replay_player_payload(row: pd.Series) -> dict:
+    """Like _player_payload but with the actual result (and naive baseline)
+    overlaid on each stat, plus the season-to-season adjustment context."""
+    stats = []
+    for stat in POSITION_STATS[row["position"]]:
+        p50 = row.get(f"{stat}_p50")
+        if p50 is None or (isinstance(p50, float) and math.isnan(p50)):
+            continue
+        entry = {"stat": stat, "actual": row.get(stat), "r8": row.get(f"{stat}_r8")}
+        for q in QUANTILES:
+            entry[f"p{int(q * 100):02d}"] = row.get(f"{stat}_p{int(q * 100):02d}")
+        stats.append(entry)
+    return _clean({
+        "player_id": row["player_id"],
+        "name": row["player_display_name"],
+        "position": row["position"],
+        "team": row["team"],
+        "opponent": row["opponent_team"],
+        "is_home": bool(row.get("is_home", 0) == 1),
+        "season": int(row["season"]),
+        "week": int(row["week"]),
+        "years_exp": row.get("years_exp"),
+        "age": row.get("age"),
+        "is_rookie": bool(row.get("is_rookie", 0) == 1),
+        "is_new_team": bool(row.get("is_new_team", 0) == 1),
+        "forecasts": stats,
+    })
+
+
+@app.get("/api/replay/seasons")
+def replay_seasons():
+    """Seasons (and their weeks) with a persisted replay artifact."""
+    out = []
+    if REPLAY_DIR.exists():
+        for sdir in sorted(REPLAY_DIR.iterdir(), reverse=True):
+            pf = sdir / "players.parquet"
+            if not sdir.is_dir() or not pf.exists() or not sdir.name.isdigit():
+                continue
+            weeks = sorted(int(w) for w in pd.read_parquet(pf, columns=["week"])["week"].dropna().unique())
+            out.append({"season": int(sdir.name), "weeks": weeks})
+    return {"seasons": out}
+
+
+@app.get("/api/replay/{season}/scorecard")
+def replay_scorecard(season: int):
+    """Season-to-season scorecard (adjusted, and baseline when compared)."""
+    path = REPLAY_DIR / str(season) / "scorecard.json"
+    if not path.exists():
+        raise HTTPException(status_code=503, detail=f"No scorecard for {season}.")
+    return json.loads(path.read_text())
+
+
+@app.get("/api/replay/{season}/{week}")
+def replay_week(season: int, week: int):
+    """Every game that week as home/away blocks of forecast-vs-actual players."""
+    df = _load_replay(season)
+    rows = df[df["week"] == week]
+    if rows.empty:
+        raise HTTPException(status_code=404, detail=f"No replay rows for {season} week {week}.")
+    out_games = []
+    for game_id, gdf in rows.groupby("game_id"):
+        teams = sorted(gdf["team"].unique())
+        blocks = {}
+        for abbr, tdf in gdf.groupby("team"):
+            tdf = tdf.sort_values("fantasy_points_p50", ascending=False)
+            blocks[abbr] = {"team": _team_meta(abbr),
+                            "players": [_replay_player_payload(r) for _, r in tdf.iterrows()]}
+        home_rows = gdf[gdf["is_home"] == 1]
+        home = home_rows["team"].iloc[0] if not home_rows.empty else teams[0]
+        away = next((t for t in teams if t != home), teams[-1])
+        out_games.append(_clean({"game_id": game_id,
+                                 "home": blocks.get(home), "away": blocks.get(away)}))
+    return {"season": season, "week": week, "games": out_games}
+
+
+@app.get("/api/replay/{season}/{week}/player/{player_id}")
+def replay_player(season: int, week: int, player_id: str):
+    """One player's forecast-vs-actual detail for a replayed week."""
+    df = _load_replay(season)
+    rows = df[(df["week"] == week) & (df["player_id"] == player_id)]
+    if rows.empty:
+        raise HTTPException(status_code=404, detail="player not in this replay week")
+    return _replay_player_payload(rows.iloc[0])
 
 
 if WEB_DIR.exists():

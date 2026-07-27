@@ -396,3 +396,106 @@ body {
   font-family: var(--mono); color: var(--accent);
   background: rgba(57, 135, 229, 0.1); padding: 2px 8px; border-radius: 6px;
 }
+
+/* ---------- main nav (Slate | Replay) ---------- */
+.mainnav { display: flex; gap: 4px; }
+.mainnav a {
+  font: 700 13px var(--font); letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--ink-3); text-decoration: none;
+  padding: 8px 14px; border-radius: 999px; border: 1px solid transparent;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.mainnav a:hover { color: var(--ink-2); }
+.mainnav a.active {
+  color: var(--ink); border-color: var(--edge); background: var(--surface);
+}
+
+/* ---------- replay: actual-result overlay on the quantile strip ---------- */
+.qstrip .actual {
+  position: absolute; top: 1px; width: 3px; height: 20px; border-radius: 2px;
+  background: #ffcf4a; box-shadow: 0 0 9px rgba(255, 207, 74, 0.75);
+  transform: translateX(-1px);
+}
+.stat-p50 .sp-act {
+  display: block; font-size: 11px; font-weight: 700; color: #ffcf4a; margin-top: 1px;
+}
+.tooltip .tt-actual td { color: #ffcf4a; font-weight: 700; padding-top: 3px; }
+
+/* rookie / new-team chips on player cards */
+.ptag {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 5px;
+}
+.ptag-rookie { color: #ffcf4a; background: rgba(255, 207, 74, 0.14); border: 1px solid rgba(255, 207, 74, 0.4); }
+.ptag-new { color: #9ed0ff; background: rgba(158, 208, 255, 0.12); border: 1px solid rgba(158, 208, 255, 0.4); }
+
+.player-card.clickable { cursor: pointer; transition: transform 0.15s, border-color 0.15s; }
+.player-card.clickable:hover { transform: translateY(-2px); border-color: rgba(57, 135, 229, 0.45); }
+
+/* ---------- replay controls ---------- */
+.replay-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin: 4px 2px 20px;
+}
+.picker-group { display: flex; gap: 14px; }
+.picker-group label {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+.picker-group select {
+  font: 700 14px var(--font); letter-spacing: 0.04em;
+  color: var(--ink); background: var(--surface);
+  border: 1px solid var(--edge); border-radius: 999px; padding: 8px 14px;
+  cursor: pointer; outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+}
+.picker-group select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ---------- scorecard ---------- */
+.scorecard {
+  background: linear-gradient(160deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--edge); border-radius: 18px;
+  padding: 20px 22px; margin-bottom: 26px;
+}
+.sc-title {
+  font-size: 13px; font-weight: 800; letter-spacing: 0.2em; text-transform: uppercase;
+  color: var(--ink-2); margin-bottom: 14px;
+}
+.sc-sub { color: var(--ink-3); font-weight: 600; letter-spacing: 0.06em; text-transform: none; margin-left: 8px; }
+.sc-table-wrap { overflow-x: auto; }
+.sc-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.sc-table th {
+  text-align: right; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-3); font-weight: 700; padding: 4px 10px 10px; border-bottom: 1px solid var(--edge);
+}
+.sc-table th:first-child { text-align: left; }
+.sc-table td { padding: 6px 10px; text-align: right; font-family: var(--mono); color: var(--ink-2); }
+.sc-table td.sc-seg { text-align: left; font-family: var(--font); font-weight: 700; color: var(--ink); }
+.sc-table tr.sc-grouphead td {
+  text-align: left; font-family: var(--font); font-size: 11px; font-weight: 800;
+  letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-3);
+  padding: 14px 10px 4px;
+}
+.sc-skill.pos, .sc-delta.pos { color: #4bd07a; }
+.sc-skill.neg, .sc-delta.neg { color: #ff7a7a; }
+.sc-delta { font-weight: 700; }
+.sc-base { color: var(--ink-3); }
+
+/* ---------- replay games ---------- */
+.replay-games { display: flex; flex-direction: column; gap: 26px; }
+.replay-game {
+  border: 1px solid var(--edge); border-radius: 16px;
+  padding: 16px 18px 6px; background: rgba(255, 255, 255, 0.012);
+}
+.replay-game-head {
+  font-size: 13px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--ink-2); margin-bottom: 14px;
+}
+.replay-game-head span { color: var(--ink-3); margin: 0 4px; }
+
+.player-detail {
+  background: linear-gradient(165deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--edge); border-radius: 18px; padding: 22px 24px;
+}
+.pd-sub { color: var(--ink-3); font-size: 13px; letter-spacing: 0.06em; margin: 6px 0 18px; }
+.pd-stats { max-width: 620px; }
