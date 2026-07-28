@@ -258,6 +258,19 @@ def fetch_frame(key: str, seasons: list[int] | None = None, *,
     return pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
 
 
+def revalidate_current(keys: tuple[str, ...] = ("player_weeks", "schedules", "rosters")) -> None:
+    """Force-refresh the current season's files for the given datasets.
+
+    Used by `gameday train` to guarantee training sees this week's data even
+    inside the TTL window. Past seasons stay immutable; a 404 (offseason,
+    stats not published yet) is negative-cached and quietly skipped.
+    """
+    cur = current_nfl_season()
+    for key in keys:
+        ds = CATALOG[key]
+        fetch_asset(ds, cur if ds.per_season else None, force=True)
+
+
 def data_versions() -> dict[str, dict]:
     """Cache freshness per catalog dataset, summarized from the sidecars.
 
