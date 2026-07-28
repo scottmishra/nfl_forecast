@@ -40,7 +40,10 @@ GATE_COVERAGE80 = (0.70, 0.90)
 # refresh (filtered to whichever exist in the feature frame) — the dashboard's
 # player usage sparklines read them via /api/player/{id}/usage.
 USAGE_ARTIFACT_COLS = ["attempts", "carries", "targets", "target_share",
-                       "air_yards_share", "wopr", "racr"]
+                       "air_yards_share", "wopr", "racr",
+                       "snap_pct", "carry_share", "target_share_team",
+                       "pred_snap_pct_p50", "pred_carry_share_p50",
+                       "pred_target_share_team_p50"]
 
 
 @dataclass
@@ -62,6 +65,22 @@ class GBMParams:
 
 
 @dataclass
+class UsageGBMParams:
+    """LightGBM settings for the usage forecaster (models/usage_forecast.py).
+
+    Usage shares are smoother targets than stat lines, and the season-fold
+    OOF pass multiplies fits, so this model runs lighter than the stat GBM."""
+
+    num_leaves: int = 15
+    learning_rate: float = 0.05
+    n_estimators: int = 200
+    min_child_samples: int = 40
+    subsample: float = 0.9
+    colsample_bytree: float = 0.8
+    reg_lambda: float = 1.0
+
+
+@dataclass
 class NeuralParams:
     """Torch quantile-MLP settings. ~1M params — trivially fits in 8GB VRAM."""
 
@@ -77,6 +96,7 @@ class NeuralParams:
 class Settings:
     seasons: list[int] = field(default_factory=lambda: list(range(2016, 2026)))
     gbm: GBMParams = field(default_factory=GBMParams)
+    usage_gbm: UsageGBMParams = field(default_factory=UsageGBMParams)
     neural: NeuralParams = field(default_factory=NeuralParams)
     # Conformal (CQR) interval calibration — see gameday/models/calibrate.py.
     # `calibrate` computes split-conformal offsets on the engines' internal
