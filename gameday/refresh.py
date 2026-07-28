@@ -95,6 +95,25 @@ def _offseason_reason(games: pd.DataFrame, horizon_days: int) -> str | None:
     return None
 
 
+def _emit_season_artifact(feats: pd.DataFrame, full_games: pd.DataFrame,
+                          engine: str) -> None:
+    """Best-effort: season-long per-(player, week) fantasy quantiles ->
+    latest_season.parquet for the draft board. Never fails the refresh."""
+    try:
+        from gameday.season_projection import project_season
+        out = project_season(feats, full_games, engine=engine)
+        if out.empty:
+            return
+        path = FORECASTS_DIR / "latest_season.parquet"
+        tmp = path.with_name(f".tmp-{os.getpid()}-{path.name}")
+        out.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
+        log.info("wrote season artifact: %d player-weeks / %d players",
+                 len(out), out["player_id"].nunique())
+    except Exception as exc:  # noqa: BLE001 — draft board is non-critical
+        log.warning("season artifact skipped (%s)", exc)
+
+
 def _emit_usage_artifact(feats: pd.DataFrame, result: pd.DataFrame) -> None:
     """Best-effort: each slate player's last-8-played-weeks usage rows
     (USAGE_ARTIFACT_COLS, filtered to those present) -> latest_usage.parquet
@@ -171,6 +190,7 @@ def run_refresh(horizon_days: int = 8, sims: int = 300, sync: bool = True,
             "data_versions": releases.data_versions(),
         })
         _emit_usage_artifact(data.feats, result)  # best-effort, never fatal
+        _emit_season_artifact(data.feats, games, engine)  # best-effort too
         status["ok"] = True
         log.info("refresh complete: %d forecasts, models %s",
                  len(result), manifest.get("version"))

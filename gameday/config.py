@@ -45,6 +45,12 @@ USAGE_ARTIFACT_COLS = ["attempts", "carries", "targets", "target_share",
                        "pred_snap_pct_p50", "pred_carry_share_p50",
                        "pred_target_share_team_p50"]
 
+# Draft board (season-long projections behind /api/draft).
+SEASON_MAX_WEEK = 18  # regular season only — draft value ignores playoffs
+# Replacement-level rank per position (12-team PPR: QB1, ~2.5 RB, 3 WR, TE1
+# starting slots). VORP = season total minus the Nth-ranked player's total.
+REPLACEMENT_RANK = {"QB": 12, "RB": 30, "WR": 36, "TE": 12}
+
 
 @dataclass
 class GBMParams:

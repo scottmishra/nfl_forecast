@@ -637,6 +637,102 @@ async function renderReplayPlayer(season, week, playerId) {
   bindStripTooltips();
 }
 
+/* ---------- draft board ---------- */
+
+function wkStrip(weeks, firstWeek, lastWeek, posMax) {
+  const cells = [];
+  for (let w = firstWeek; w <= lastWeek; w++) {
+    const p = weeks[w];
+    if (p == null) {
+      cells.push(`<span class="wk-cell bye" data-tip="Week ${w}: bye"></span>`);
+    } else {
+      const alpha = Math.max(0.12, Math.min(1, p / (posMax || 1)));
+      cells.push(`<span class="wk-cell" style="opacity:${alpha.toFixed(2)}"
+                        data-tip="Week ${w}: ${fmt(p)} proj"></span>`);
+    }
+  }
+  return `<span class="wk-strip">${cells.join("")}</span>`;
+}
+
+async function renderDraft(position = "ALL") {
+  view.innerHTML = `<div class="loading"><div class="spinner"></div><p>Building the draft board…</p></div>`;
+  let data;
+  try {
+    data = await api(`/api/draft?position=${encodeURIComponent(position)}`);
+  } catch (err) {
+    if (err.status === 404) {
+      view.innerHTML = `<div class="error-box"><h2>No season projection yet</h2>
+        <p>The draft board appears after the next <code>gameday refresh</code>.</p></div>`;
+      return;
+    }
+    return renderError(err);
+  }
+  const players = data.players || [];
+  weekPill.textContent = `${data.season} draft`;
+  const positions = ["ALL", "QB", "RB", "WR", "TE"];
+  // Week-cell shading is scaled per position (vs the position's best week),
+  // so an ALL view still reads sensibly within each row's position.
+  const posMax = {};
+  players.forEach((p) => {
+    const best = Math.max(...Object.values(p.weeks || {}), 0);
+    posMax[p.position] = Math.max(posMax[p.position] || 0, best);
+  });
+  view.innerHTML = `
+    <div class="section-title">Draft Board — ${data.season} · weeks ${data.first_week}–${data.last_week}</div>
+    <div class="draft-pills">
+      ${positions.map((p) => `
+        <button class="draft-pill ${p === position ? "active" : ""}" data-pos="${p}">${p}</button>`).join("")}
+    </div>
+    <div class="draft-scroll">
+    <table class="draft-table">
+      <thead><tr>
+        <th></th><th>Player</th><th>Pos</th><th>Team</th><th>Bye</th>
+        <th class="num">Total</th><th class="num">Floor–Ceiling</th>
+        <th class="num">VORP</th><th>Weekly projection</th>
+      </tr></thead>
+      <tbody>
+        ${players.map((p, i) => `
+          <tr>
+            <td class="draft-rank">${i + 1}</td>
+            <td><b>${esc(p.name)}</b></td>
+            <td><span class="pos-badge pos-${esc(p.position)}">${esc(p.position)}</span></td>
+            <td>${esc(p.team)}</td>
+            <td>${p.bye ?? "—"}</td>
+            <td class="num"><b>${fmt(p.total_p50)}</b></td>
+            <td class="num">${fmt(p.total_floor)}–${fmt(p.total_ceiling)}</td>
+            <td class="num draft-vorp ${p.vorp < 0 ? "neg" : ""}">${p.vorp > 0 ? "+" : ""}${fmt(p.vorp)}</td>
+            <td>${wkStrip(p.weeks || {}, data.first_week, data.last_week, posMax[p.position])}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>
+    </div>
+    <div class="draft-note">
+      Total = sum of weekly median projections (${data.model_version || "current models"}) ·
+      VORP = points over the replacement starter
+      (${Object.entries(data.replacement || {}).map(([k, v]) => `${k}${REPL_RANKS[k] || ""} ${fmt(v)}`).join(" · ")}) ·
+      floor–ceiling sums weekly p25/p75 — an envelope, not a season quantile.
+    </div>`;
+  view.querySelectorAll(".draft-pill").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      location.hash = btn.dataset.pos === "ALL" ? "#draft" : `#draft/${btn.dataset.pos}`;
+    }));
+  bindTipTargets();
+}
+
+const REPL_RANKS = { QB: 12, RB: 30, WR: 36, TE: 12 };
+
+function bindTipTargets() {
+  view.querySelectorAll("[data-tip]").forEach((el) => {
+    el.addEventListener("mousemove", (e) => {
+      tooltip.textContent = el.dataset.tip;
+      tooltip.hidden = false;
+      tooltip.style.left = `${e.clientX + 12}px`;
+      tooltip.style.top = `${e.clientY + 12}px`;
+    });
+    el.addEventListener("mouseleave", () => { tooltip.hidden = true; });
+  });
+}
+
 /* ---------- errors & routing ---------- */
 
 function renderError(err) {
@@ -655,7 +751,9 @@ function renderError(err) {
 
 function updateNav() {
   const isReplay = location.hash.startsWith("#replay");
-  document.getElementById("nav-slate")?.classList.toggle("active", !isReplay);
+  const isDraft = location.hash.startsWith("#draft");
+  document.getElementById("nav-slate")?.classList.toggle("active", !isReplay && !isDraft);
+  document.getElementById("nav-draft")?.classList.toggle("active", isDraft);
   document.getElementById("nav-replay")?.classList.toggle("active", isReplay);
 }
 
@@ -666,6 +764,8 @@ function route() {
     renderReplayPlayer(Number(m[1]), Number(m[2]), decodeURIComponent(m[3]));
   } else if ((m = h.match(/^#replay(?:\/(\d+))?(?:\/(\d+))?$/))) {
     renderReplay(m[1] ? Number(m[1]) : null, m[2] ? Number(m[2]) : null);
+  } else if ((m = h.match(/^#draft(?:\/(QB|RB|WR|TE))?$/))) {
+    renderDraft(m[1] || "ALL");
   } else if ((m = h.match(/^#game\/(.+)$/))) {
     renderGame(decodeURIComponent(m[1]));
   } else {

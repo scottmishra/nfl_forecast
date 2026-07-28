@@ -14,6 +14,27 @@
   .usage-box { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; color: var(--ink-3, #8b93a7); }
   .usage-box[hidden] { display: none; }
   .usage-box .spark { color: var(--ink-2, #b8c0d4); flex: none; }
+  /* draft board */
+  .draft-pills { display: flex; gap: 8px; margin: 6px 0 14px; flex-wrap: wrap; }
+  .draft-pill { border: 1px solid var(--line, #2a3245); background: none; color: inherit;
+                border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+  .draft-pill.active { background: var(--accent, #3987e5); border-color: var(--accent, #3987e5); color: #fff; }
+  .draft-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .draft-table th { text-align: left; font-size: 11px; text-transform: uppercase;
+                    letter-spacing: .06em; color: var(--ink-3, #8b93a7); padding: 6px 8px;
+                    border-bottom: 1px solid var(--line, #2a3245); position: sticky; top: 0;
+                    background: var(--bg, #0d1220); }
+  .draft-table td { padding: 7px 8px; border-bottom: 1px solid var(--line, #1c2333); white-space: nowrap; }
+  .draft-table tr:hover td { background: rgba(255,255,255,.03); }
+  .draft-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .draft-rank { color: var(--ink-3, #8b93a7); width: 30px; }
+  .draft-vorp { font-weight: 700; }
+  .draft-vorp.neg { color: var(--ink-3, #8b93a7); font-weight: 400; }
+  .wk-strip { display: inline-flex; gap: 2px; vertical-align: middle; }
+  .wk-cell { width: 9px; height: 18px; border-radius: 2px; background: var(--accent, #3987e5); }
+  .wk-cell.bye { background: none; border: 1px dashed var(--line, #2a3245); }
+  .draft-note { margin-top: 10px; font-size: 12px; color: var(--ink-3, #8b93a7); }
+  .draft-scroll { overflow-x: auto; }
 </style>
 </head>
 <body data-palette="#3987e5,#008300,#d55181,#c98500">
@@ -26,6 +47,7 @@
   </a>
   <nav class="mainnav">
     <a href="#" id="nav-slate" class="active">Slate</a>
+    <a href="#draft" id="nav-draft">Draft</a>
     <a href="#replay" id="nav-replay">Replay</a>
   </nav>
   <div class="week-pill" id="week-pill">—</div>

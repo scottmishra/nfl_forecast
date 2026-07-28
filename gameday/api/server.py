@@ -21,7 +21,8 @@ from fastapi.staticfiles import StaticFiles
 
 from gameday import bundle
 from gameday.config import (ARTIFACTS_DIR, FORECASTS_DIR, MODELS_ROOT,
-                            POSITION_STATS, QUANTILES, ROOT)
+                            POSITION_STATS, QUANTILES, REPLACEMENT_RANK, ROOT,
+                            SEASON_MAX_WEEK)
 from gameday.data.teams import TEAMS
 
 app = FastAPI(title="Gameday Forecaster", version="0.1.0")
@@ -249,6 +250,85 @@ def player_usage(player_id: str):
         raise HTTPException(status_code=404, detail=f"no usage rows for player {player_id}")
     cols = [c for c in rows.columns if c != "player_id"]
     return {"player_id": player_id, "weeks": _clean(rows[cols].to_dict("records"))}
+
+
+# --------------------------------------------------------------------------
+# draft board — season-long projections by position (artifacts latest_season)
+# --------------------------------------------------------------------------
+
+def _load_season() -> pd.DataFrame:
+    path = FORECASTS_DIR / "latest_season.parquet"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="No season projection yet — it appears after the next `gameday refresh`.",
+        )
+    return _mtime_cached("season", [path], lambda: pd.read_parquet(path))
+
+
+def _draft_rows(df: pd.DataFrame) -> list[dict]:
+    """One entry per player: season totals, floor/ceiling envelope, weekly
+    medians, and bye week (the team's missing regular-season week)."""
+    team_weeks = df.groupby("team")["week"].agg(set)
+    all_weeks = set(range(int(df["week"].min()), SEASON_MAX_WEEK + 1))
+    out = []
+    for pid, rows in df.groupby("player_id"):
+        rows = rows.sort_values("week")
+        first = rows.iloc[0]
+        byes = sorted(all_weeks - team_weeks.get(first["team"], set()))
+        out.append({
+            "player_id": pid,
+            "name": first["player_display_name"],
+            "position": first["position"],
+            "team": first["team"],
+            "bye": byes[0] if len(byes) == 1 else (byes or None),
+            "games": int(len(rows)),
+            "total_p50": round(float(rows["fantasy_points_p50"].sum()), 1),
+            # Envelope, not a true quantile of the season sum: summing weekly
+            # p25/p75 assumes perfectly correlated weeks, so it brackets wider
+            # than reality — fine as a draft-day floor/ceiling visual.
+            "total_floor": round(float(rows["fantasy_points_p25"].sum()), 1),
+            "total_ceiling": round(float(rows["fantasy_points_p75"].sum()), 1),
+            "weeks": {int(w): round(float(p), 1) for w, p in
+                      zip(rows["week"], rows["fantasy_points_p50"])},
+        })
+    return out
+
+
+@app.get("/api/draft")
+def draft_board(position: str = "ALL", limit: int = 300):
+    """Season-long draft board: per-player weekly medians, season totals, and
+    VORP (total minus the replacement-rank player's total at that position)."""
+    df = _load_season()
+    players = _draft_rows(df)
+
+    # Replacement baselines come from the full pool regardless of the filter.
+    baselines = {}
+    for pos, rank in REPLACEMENT_RANK.items():
+        totals = sorted((p["total_p50"] for p in players if p["position"] == pos),
+                        reverse=True)
+        baselines[pos] = totals[rank - 1] if len(totals) >= rank else (totals[-1] if totals else 0.0)
+    for p in players:
+        p["vorp"] = round(p["total_p50"] - baselines.get(p["position"], 0.0), 1)
+
+    position = position.upper()
+    if position != "ALL":
+        if position not in POSITION_STATS:
+            raise HTTPException(status_code=404, detail=f"unknown position {position}")
+        players = [p for p in players if p["position"] == position]
+    players.sort(key=lambda p: p["vorp"], reverse=True)
+
+    meta = _forecast_meta() or {}
+    return _clean({
+        "position": position,
+        "season": int(df["season"].iloc[0]),
+        "first_week": int(df["week"].min()),
+        "last_week": int(df["week"].max()),
+        "replacement": baselines,
+        "model_version": meta.get("model_version"),
+        "generated_at": meta.get("generated_at"),
+        "players": players[:limit],
+    })
 
 
 # --------------------------------------------------------------------------
