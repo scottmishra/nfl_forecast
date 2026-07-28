@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "version": "models-20260728-185712",
-  "url": "https://github.com/scottmishra/nfl_forecast/releases/download/models-20260728-185712/model_bundle-models-20260728-185712.tar.gz",
-  "sha256": "8235abe56d09379fb57dc47445260840b5cb62fd7628adc2e6a113d79ee30916",
-  "published_at": "2026-07-28T19:00:07+00:00"
+  "version": "models-20260728-190702",
+  "url": "https://github.com/scottmishra/nfl_forecast/releases/download/models-20260728-190702/model_bundle-models-20260728-190702.tar.gz",
+  "sha256": "cfb3056d4dffc8d5dc179b83c608c2d703fee41a24c5c6cee4d4794563c0b450",
+  "published_at": "2026-07-28T19:08:30+00:00"
 }
