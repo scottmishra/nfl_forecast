@@ -3,27 +3,20 @@
 Per-season roster snapshots — age, experience, draft position, and team — used
 for season-to-season player adjustments (a rookie vs a 12-year vet, a player who
 just changed teams, draft capital as a prior for players with little history).
-Same nflverse-data GitHub release source as the weekly stats (`nflverse.py`),
-cached locally as parquet. The roster `gsis_id` is the same id as the weekly
-`player_id`, so the two join directly.
+Fetched through the generic release layer (`gameday.data.releases`); the roster
+`gsis_id` is the same id as the weekly `player_id`, so the two join directly.
 """
 
 from __future__ import annotations
 
 import logging
 
-import httpx
 import pandas as pd
 
-from gameday.config import RAW_DIR, ensure_dirs
+from gameday.data import releases
 from gameday.data.teams import normalize_team
 
 log = logging.getLogger(__name__)
-
-ROSTER_URL = (
-    "https://github.com/nflverse/nflverse-data/releases/download/"
-    "rosters/roster_{season}.parquet"
-)
 
 # Columns kept from each per-season roster. `gsis_id` joins to weekly player_id.
 ROSTER_COLUMNS = [
@@ -40,29 +33,10 @@ def fetch_rosters(seasons: list[int], force: bool = False) -> pd.DataFrame:
     Missing seasons (e.g. a not-yet-published year) are skipped rather than
     fatal, so a caller can request a superset of seasons safely.
     """
-    ensure_dirs()
-    frames = []
-    for season in seasons:
-        cache = RAW_DIR / f"roster_{season}.parquet"
-        if cache.exists() and not force:
-            frames.append(pd.read_parquet(cache))
-            continue
-        url = ROSTER_URL.format(season=season)
-        log.info("downloading %s", url)
-        try:
-            with httpx.Client(follow_redirects=True, timeout=120) as client:
-                resp = client.get(url)
-                resp.raise_for_status()
-                cache.write_bytes(resp.content)
-        except httpx.HTTPError as exc:  # a season not published yet, or transient
-            log.warning("roster fetch failed for %s (%s); skipping", season, exc)
-            continue
-        frames.append(pd.read_parquet(cache))
-
-    if not frames:
+    df = releases.fetch_frame("rosters", seasons, force=force, columns=ROSTER_COLUMNS)
+    if df.empty:
         return pd.DataFrame(columns=ROSTER_COLUMNS)
 
-    df = pd.concat(frames, ignore_index=True)
     df = df[[c for c in ROSTER_COLUMNS if c in df.columns]].copy()
     df = df[df["gsis_id"].notna()]  # a rare row has a null id; it can't join
     if "birth_date" in df.columns:  # date-typed in rosters, str in players — normalize
