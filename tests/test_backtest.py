@@ -1,13 +1,31 @@
+import json
+
 import pytest
 
 from gameday import backtest as bt
-from gameday.config import POSITION_STATS
+from gameday.config import POSITION_STATS, settings
 
 
 @pytest.fixture(scope="module")
 def report():
     return bt.run_backtest(source="demo", seasons=[2024, 2025],
                            weeks=[6], n_sims=15, seed=3)
+
+
+def test_qb_features_pruned(report):
+    """The prune pass caps QB/TE at top-K gain features and records the list."""
+    manifest = json.loads(
+        (bt.BACKTEST_DIR / "models" / "v2" / "manifest_QB.json").read_text())
+    top_k = settings.gbm.top_k_features["QB"]
+    assert len(manifest["features"]) <= top_k
+
+
+def test_new_interval_metrics_present(report):
+    for stats in report["players"].values():
+        for r in stats.values():
+            assert 0.0 <= r["coverage50"] <= 1.0
+            assert r["interval_width80"] >= 0
+            assert set(r["pinball_by_q"]) == {"p10", "p25", "p50", "p75", "p90"}
 
 
 def test_report_structure(report):

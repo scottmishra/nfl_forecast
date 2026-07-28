@@ -54,6 +54,11 @@ class GBMParams:
     subsample: float = 0.9
     colsample_bytree: float = 0.8
     reg_lambda: float = 1.0
+    # Post-training prune: keep the top-K features per position by total gain
+    # importance and retrain on that list (None = keep every feature). QB/TE
+    # have thinner rows-per-feature ratios, so they prune by default.
+    top_k_features: dict = field(
+        default_factory=lambda: {"QB": 60, "RB": None, "WR": None, "TE": 60})
 
 
 @dataclass
@@ -73,6 +78,13 @@ class Settings:
     seasons: list[int] = field(default_factory=lambda: list(range(2016, 2026)))
     gbm: GBMParams = field(default_factory=GBMParams)
     neural: NeuralParams = field(default_factory=NeuralParams)
+    # Conformal (CQR) interval calibration — see gameday/models/calibrate.py.
+    # `calibrate` computes split-conformal offsets on the engines' internal
+    # holdout season; `refit_on_all` then refits on every row while keeping
+    # those offsets (more data for the point forecasts, slightly conservative
+    # offsets — see the note in the engines' train_position).
+    calibrate: bool = True
+    refit_on_all: bool = True
 
 
 settings = Settings()

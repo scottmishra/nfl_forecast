@@ -52,14 +52,20 @@ def run_backtest(
     seed: int = 7,
     compare: bool = False,
     persist_replay: bool = True,
+    variants: list[dict] | None = None,
 ) -> dict:
     """Replay a past season out-of-sample.
 
     `persist_replay` writes per-player forecast-vs-actual rows + a scenario
     scorecard to artifacts/replay/{season} (consumed by the dashboard Replay
-    view). `compare` additionally scores the player model WITHOUT the
-    season-to-season adjustment features, so the scorecard shows the before/after
-    lift per segment.
+    view).
+
+    `variants` names the model configurations to score side by side. Each is
+    dict(name, engine, feature_set[, include_adjustments]); the first is the
+    *primary* whose rows feed the dashboard. Defaults to the current feature
+    schema vs the previous one — [v2, v1] — so the scorecard always shows the
+    new-vs-old lift per segment. (`compare` is retained for callers of the old
+    adjusted/no-adjustments A/B; the default variants supersede it.)
     """
     player_weeks, games = load_data(source, seasons)
     roster_df = None if source == "demo" else rosters.fetch_rosters(
@@ -74,13 +80,16 @@ def run_backtest(
 
     feats = build_features(player_weeks, games, rosters=roster_df)
 
-    players_report, scorecard = _backtest_players(
-        feats, test_season, weeks, engine, compare=compare, persist_replay=persist_replay)
+    players_reports, scorecard, primary = _backtest_players(
+        feats, test_season, weeks, engine, persist_replay=persist_replay,
+        variants=variants)
 
     report = {
         "source": source, "test_season": test_season, "weeks": weeks,
         "n_games": int(len(test_games)), "engine": engine, "n_sims": n_sims,
-        "players": players_report,
+        "primary_variant": primary,
+        "players": players_reports.get(primary, {}),
+        "players_by_variant": players_reports,
         "scorecard": scorecard,
         "sims": (_backtest_sims(player_weeks, games, test_games, n_sims, seed)
                  if n_sims > 0 else {"skipped": True}),
@@ -104,33 +113,51 @@ def _model_engine(engine: str):
     return m
 
 
-def _backtest_players(feats: pd.DataFrame, test_season: int, weeks: list[int],
-                      engine: str, compare: bool = False,
-                      persist_replay: bool = True):
-    """Train per-position models on <test_season and predict the test weeks.
+def _default_variants(engine: str) -> list[dict]:
+    """New feature schema vs old, on the requested engine. First = primary."""
+    return [dict(name="v2", engine=engine, feature_set="v2"),
+            dict(name="v1", engine=engine, feature_set="v1")]
 
-    Returns (per-position/stat aggregate report, scenario scorecard). Persists
-    per-player replay rows + the scorecard to artifacts/replay when asked."""
-    m = _model_engine(engine)
-    # Backtest models land in their own directory so they never clobber
-    # production models.
-    models_dir = BACKTEST_DIR / "models"
-    models_dir.mkdir(parents=True, exist_ok=True)
-    report, adj_preds = _predict_positions(
-        m, feats, test_season, weeks, include_adjustments=True, models_dir=models_dir)
-    base_preds = None
-    if compare:
-        log.info("scoring baseline (no season-to-season adjustments) for comparison")
-        _, base_preds = _predict_positions(
-            m, feats, test_season, weeks, include_adjustments=False, models_dir=models_dir)
-    scorecard = _scenario_scorecard(adj_preds, base_preds)
-    if persist_replay and not adj_preds.empty:
-        _persist_replay(test_season, adj_preds, scorecard)
-    return report, scorecard
+
+def _backtest_players(feats: pd.DataFrame, test_season: int, weeks: list[int],
+                      engine: str, persist_replay: bool = True,
+                      variants: list[dict] | None = None):
+    """Train and score every variant on <test_season, predict the test weeks.
+
+    Returns ({variant: per-position/stat report}, scenario scorecard, primary
+    variant name). Persists per-player replay rows + the scorecard to
+    artifacts/replay when asked."""
+    variants = variants or _default_variants(engine)
+    primary = variants[0]["name"]
+    reports: dict[str, dict] = {}
+    frames: dict[str, pd.DataFrame] = {}
+    for var in variants:
+        name, var_engine = var["name"], var.get("engine", engine)
+        m = _model_engine(var_engine)
+        # Backtest models land in their own per-variant directory so variants
+        # never clobber each other's manifests — or production models.
+        models_dir = BACKTEST_DIR / "models" / name
+        models_dir.mkdir(parents=True, exist_ok=True)
+        log.info("scoring variant %s (engine=%s, feature_set=%s)",
+                 name, var_engine, var.get("feature_set", "v2"))
+        rep, preds = _predict_positions(
+            m, feats, test_season, weeks,
+            include_adjustments=var.get("include_adjustments", True),
+            models_dir=models_dir, feature_set=var.get("feature_set", "v2"))
+        if not preds.empty:
+            preds["variant"] = name
+            preds["engine"] = var_engine
+        reports[name] = rep
+        frames[name] = preds
+    scorecard = _scenario_scorecard(frames, primary)
+    if persist_replay and not frames[primary].empty:
+        _persist_replay(test_season, frames, primary, scorecard)
+    return reports, scorecard, primary
 
 
 def _predict_positions(m, feats: pd.DataFrame, test_season: int, weeks: list[int],
-                       include_adjustments: bool, models_dir=None):
+                       include_adjustments: bool, models_dir=None,
+                       feature_set: str = "v2"):
     """Train each position on <test_season, predict the test weeks.
 
     Returns (per-position/stat aggregate report, concatenated per-player
@@ -145,7 +172,8 @@ def _predict_positions(m, feats: pd.DataFrame, test_season: int, weeks: list[int
     for position in POSITIONS:
         pos = feats[(feats["position"] == position) & feats["fantasy_points"].notna()]
         pos = pos[pos["games_played"] >= 2]
-        cols = feature_columns(position, pos, include_adjustments=include_adjustments)
+        cols = feature_columns(position, pos, include_adjustments=include_adjustments,
+                               feature_set=feature_set)
 
         train = pos[pos["season"] < test_season].copy()
         test = pos[(pos["season"] == test_season) & pos["week"].isin(weeks)].copy()
@@ -153,9 +181,8 @@ def _predict_positions(m, feats: pd.DataFrame, test_season: int, weeks: list[int
             log.warning("%s: no train or test rows; skipping", position)
             continue
 
-        log.info("training %s on %d rows (< %d), scoring %d test rows%s",
-                 position, len(train), test_season, len(test),
-                 "" if include_adjustments else " [baseline]")
+        log.info("training %s on %d rows (< %d), scoring %d test rows [%s]",
+                 position, len(train), test_season, len(test), feature_set)
         m.train_position(train, position, cols, models_dir=models_dir)
         pred = m.predict_position(test, position, models_dir=models_dir)
         report[position] = _position_stats_report(pred, position)
@@ -165,6 +192,16 @@ def _predict_positions(m, feats: pd.DataFrame, test_season: int, weeks: list[int
     return report, pred_all
 
 
+def _pinball_by_q(y: np.ndarray, pred: pd.DataFrame, stat: str) -> dict[str, float]:
+    """Per-quantile pinball loss, keyed p10..p90."""
+    out = {}
+    for q in QUANTILES:
+        err = y - pred[f"{stat}_p{int(q * 100):02d}"].values
+        out[f"p{int(q * 100):02d}"] = round(
+            float(np.mean(np.maximum(q * err, (q - 1) * err))), 3)
+    return out
+
+
 def _position_stats_report(pred: pd.DataFrame, position: str) -> dict:
     """Per-stat MAE / skill-vs-naive / coverage / pinball for one position."""
     stats_report = {}
@@ -172,13 +209,10 @@ def _position_stats_report(pred: pd.DataFrame, position: str) -> dict:
         y = pred[stat].astype(float).values
         p50 = pred[f"{stat}_p50"].values
         p10, p90 = pred[f"{stat}_p10"].values, pred[f"{stat}_p90"].values
+        p25, p75 = pred[f"{stat}_p25"].values, pred[f"{stat}_p75"].values
         naive = pred[f"{stat}_r8"].fillna(0).values  # trailing 8-game mean
 
-        pinball = float(np.mean([
-            np.mean(np.maximum(q * (y - pred[f"{stat}_p{int(q*100):02d}"].values),
-                               (q - 1) * (y - pred[f"{stat}_p{int(q*100):02d}"].values)))
-            for q in QUANTILES
-        ]))
+        by_q = _pinball_by_q(y, pred, stat)
         mae = float(np.mean(np.abs(y - p50)))
         mae_naive = float(np.mean(np.abs(y - naive)))
         stats_report[stat] = {
@@ -187,7 +221,10 @@ def _position_stats_report(pred: pd.DataFrame, position: str) -> dict:
             "mae_naive": round(mae_naive, 3),
             "skill_vs_naive": round(1.0 - mae / mae_naive, 3) if mae_naive > 0 else None,
             "coverage80": round(float(np.mean((y >= p10) & (y <= p90))), 3),
-            "pinball": round(pinball, 3),
+            "coverage50": round(float(np.mean((y >= p25) & (y <= p75))), 3),
+            "interval_width80": round(float(np.mean(p90 - p10)), 3),
+            "pinball": round(float(np.mean(list(by_q.values()))), 3),
+            "pinball_by_q": by_q,
         }
     return stats_report
 
@@ -197,27 +234,38 @@ def _position_stats_report(pred: pd.DataFrame, position: str) -> dict:
 # --------------------------------------------------------------------------
 
 def _segment_metrics(df: pd.DataFrame | None) -> dict | None:
-    """Fantasy-points MAE / skill-vs-naive / coverage for a slice of rows."""
+    """Fantasy-points MAE / skill-vs-naive / coverage / pinball for a slice."""
     if df is None or df.empty or "fantasy_points" not in df:
         return None
     y = pd.to_numeric(df["fantasy_points"], errors="coerce").to_numpy()
-    p50 = pd.to_numeric(df["fantasy_points_p50"], errors="coerce").to_numpy()
-    p10 = pd.to_numeric(df["fantasy_points_p10"], errors="coerce").to_numpy()
-    p90 = pd.to_numeric(df["fantasy_points_p90"], errors="coerce").to_numpy()
+    quants = {q: pd.to_numeric(df[f"fantasy_points_p{int(q * 100):02d}"],
+                               errors="coerce").to_numpy() for q in QUANTILES}
     naive = pd.to_numeric(df["fantasy_points_r8"], errors="coerce").fillna(0).to_numpy()
     mask = ~np.isnan(y)
     if mask.sum() == 0:
         return None
-    y, p50, p10, p90, naive = y[mask], p50[mask], p10[mask], p90[mask], naive[mask]
+    y, naive = y[mask], naive[mask]
+    quants = {q: v[mask] for q, v in quants.items()}
+    p10, p25, p50, p75, p90 = (quants[q] for q in QUANTILES)
     mae = float(np.mean(np.abs(y - p50)))
     mae_naive = float(np.mean(np.abs(y - naive)))
+    pinball = float(np.mean([
+        np.mean(np.maximum(q * (y - v), (q - 1) * (y - v))) for q, v in quants.items()]))
     return {
         "n": int(mask.sum()),
         "mae_p50": round(mae, 3),
         "mae_naive": round(mae_naive, 3),
         "skill_vs_naive": round(1.0 - mae / mae_naive, 3) if mae_naive > 0 else None,
         "coverage80": round(float(np.mean((y >= p10) & (y <= p90))), 3),
+        "coverage50": round(float(np.mean((y >= p25) & (y <= p75))), 3),
+        "interval_width80": round(float(np.mean(p90 - p10)), 3),
+        "pinball": round(pinball, 3),
     }
+
+
+# Tier 1 = a "startable star" by last season's positional fantasy finish;
+# tier 2 is the next tranche of the same size, tier 3 everyone ranked below.
+TIER1_PREV_RANK = {"QB": 10, "RB": 12, "WR": 12, "TE": 8}
 
 
 def _segments(df: pd.DataFrame):
@@ -234,6 +282,13 @@ def _segments(df: pd.DataFrame):
     newt = pd.to_numeric(df.get("is_new_team"), errors="coerce").fillna(0)
     yield "team", "changed team", df[newt == 1]
     yield "team", "same team", df[newt == 0]
+    if "pos_rank_prev" in df and "position" in df:
+        rank = pd.to_numeric(df["pos_rank_prev"], errors="coerce")
+        cut = df["position"].map(TIER1_PREV_RANK).astype(float)
+        yield "tier", "tier1 (stars)", df[rank <= cut]
+        yield "tier", "tier2", df[(rank > cut) & (rank <= 2 * cut)]
+        yield "tier", "tier3 (rest)", df[rank > 2 * cut]
+        yield "tier", "no prior season", df[rank.isna()]
 
 
 def _scorecard_for(df: pd.DataFrame) -> dict:
@@ -243,12 +298,21 @@ def _scorecard_for(df: pd.DataFrame) -> dict:
     return card
 
 
-def _scenario_scorecard(adjusted_preds, baseline_preds) -> dict:
-    """Fantasy-points scorecard, per segment, for the adjusted model (always)
-    and the baseline model (when a comparison run was requested)."""
-    out = {"adjusted": _scorecard_for(adjusted_preds)}
-    if baseline_preds is not None and not baseline_preds.empty:
-        out["baseline"] = _scorecard_for(baseline_preds)
+def _scenario_scorecard(frames: dict[str, pd.DataFrame], primary: str) -> dict:
+    """Fantasy-points scorecard, per segment, for every scored variant.
+
+    The primary variant is also exposed under the legacy "adjusted" key and
+    the first comparison variant under "baseline", so the dashboard Replay
+    tab keeps rendering without changes."""
+    out: dict = {"primary": primary, "variants": {}}
+    for name, df in frames.items():
+        if df is not None and not df.empty:
+            out["variants"][name] = _scorecard_for(df)
+    if primary in out["variants"]:
+        out["adjusted"] = out["variants"][primary]
+    others = [n for n in out["variants"] if n != primary]
+    if others:
+        out["baseline"] = out["variants"][others[0]]
     return out
 
 
@@ -258,8 +322,8 @@ def _scenario_scorecard(adjusted_preds, baseline_preds) -> dict:
 
 def _replay_columns(df: pd.DataFrame) -> pd.DataFrame:
     ident = ["player_id", "player_display_name", "position", "team", "opponent_team",
-             "is_home", "season", "week", "game_id",
-             "years_exp", "age", "is_rookie", "is_new_team"]
+             "is_home", "season", "week", "game_id", "engine", "variant",
+             "years_exp", "age", "is_rookie", "is_new_team", "pos_rank_prev"]
     all_stats = sorted({s for v in POSITION_STATS.values() for s in v})
     stat_cols = [f"{stat}{suf}" for stat in all_stats
                  for suf in ("", "_p10", "_p25", "_p50", "_p75", "_p90", "_r8")]
@@ -267,10 +331,19 @@ def _replay_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[keep].copy()
 
 
-def _persist_replay(season: int, preds: pd.DataFrame, scorecard: dict) -> None:
+def _persist_replay(season: int, frames: dict[str, pd.DataFrame], primary: str,
+                    scorecard: dict) -> None:
+    """players.parquet keeps its one-row-per-player-week contract (primary
+    variant only, tagged with engine/variant columns) so the replay API and
+    dashboard need no changes; the full multi-variant frame lands beside it
+    in variants.parquet for offline comparison."""
     sdir = REPLAY_DIR / str(season)
     sdir.mkdir(parents=True, exist_ok=True)
-    _replay_columns(preds).to_parquet(sdir / "players.parquet", index=False)
+    _replay_columns(frames[primary]).to_parquet(sdir / "players.parquet", index=False)
+    scored = [f for f in frames.values() if f is not None and not f.empty]
+    if len(scored) > 1:
+        pd.concat([_replay_columns(f) for f in scored], ignore_index=True) \
+            .to_parquet(sdir / "variants.parquet", index=False)
     (sdir / "scorecard.json").write_text(json.dumps(scorecard, indent=2))
     log.info("wrote replay artifacts to %s", sdir)
 
@@ -381,14 +454,16 @@ def format_report(report: dict) -> str:
         f"\nBACKTEST — season {report['test_season']}, weeks {report['weeks'][0]}–{report['weeks'][-1]}"
         f" · {report['n_games']} games · engine={report['engine']} · {report['n_sims']} sims/game",
         "\nPLAYER FORECASTS (vs naive trailing-8-game average)",
-        f"{'pos':4} {'stat':17} {'n':>5} {'MAE p50':>8} {'naive':>7} {'skill':>7} {'cov80':>6} {'pinball':>8}",
+        f"{'pos':4} {'stat':17} {'n':>5} {'MAE p50':>8} {'naive':>7} {'skill':>7}"
+        f" {'cov80':>6} {'cov50':>6} {'pinball':>8}",
     ]
     for pos, stats in report["players"].items():
         for stat, r in stats.items():
             skill = f"{r['skill_vs_naive']:+.1%}" if r["skill_vs_naive"] is not None else "—"
             lines.append(
                 f"{pos:4} {stat:17} {r['n']:>5} {r['mae_p50']:>8.2f} {r['mae_naive']:>7.2f}"
-                f" {skill:>7} {r['coverage80']:>6.0%} {r['pinball']:>8.3f}")
+                f" {skill:>7} {r['coverage80']:>6.0%} {r.get('coverage50', float('nan')):>6.0%}"
+                f" {r['pinball']:>8.3f}")
 
     s = report["sims"]
     if s.get("skipped"):
@@ -411,16 +486,19 @@ def format_report(report: dict) -> str:
 
 
 def format_scorecard(report: dict) -> str:
-    """Render the season-to-season scorecard (fantasy points, sliced by segment;
-    adjusted vs baseline when a comparison run was requested)."""
+    """Render the scenario scorecard (fantasy points, sliced by segment;
+    primary variant vs the first comparison variant when one was scored)."""
     sc = report.get("scorecard") or {}
     adj = sc.get("adjusted")
     if not adj:
         return ""
     base = sc.get("baseline")
-    header = (f"\nSEASON-TO-SEASON SCORECARD — season {report['test_season']} · fantasy points"
-              + ("  (adjusted vs baseline)" if base else "  (adjusted model)"))
-    cols = f"{'segment':16} {'n':>5} {'MAE':>7} {'skill':>8}"
+    primary = sc.get("primary", "adjusted")
+    names = [n for n in sc.get("variants", {}) if n != primary]
+    versus = f"  ({primary} vs {names[0]})" if base and names else \
+        ("  (adjusted vs baseline)" if base else f"  ({primary})")
+    header = f"\nSCENARIO SCORECARD — season {report['test_season']} · fantasy points{versus}"
+    cols = f"{'segment':16} {'n':>5} {'MAE':>7} {'skill':>8} {'cov80':>6} {'cov50':>6}"
     if base:
         cols += f" {'base skill':>11} {'Δskill':>8}"
     lines = [header, cols]
@@ -430,6 +508,7 @@ def format_scorecard(report: dict) -> str:
             return f"{label:16} {'—':>5}"
         skill = f"{a['skill_vs_naive']:+.1%}" if a["skill_vs_naive"] is not None else "—"
         out = f"{label:16} {a['n']:>5} {a['mae_p50']:>7.2f} {skill:>8}"
+        out += f" {a.get('coverage80', float('nan')):>6.0%} {a.get('coverage50', float('nan')):>6.0%}"
         if base is not None:
             if b and b["skill_vs_naive"] is not None and a["skill_vs_naive"] is not None:
                 out += f" {b['skill_vs_naive']:>+10.1%} {a['skill_vs_naive'] - b['skill_vs_naive']:>+8.1%}"
@@ -438,10 +517,104 @@ def format_scorecard(report: dict) -> str:
         return out
 
     lines.append(row("OVERALL", adj.get("overall"), base.get("overall") if base else None))
-    for group in ("phase", "experience", "team"):
+    for group in ("phase", "experience", "team", "tier"):
+        if group not in adj.get("segments", {}):
+            continue
         lines.append(f"— {group} —")
         aseg = adj.get("segments", {}).get(group, {})
         bseg = base.get("segments", {}).get(group, {}) if base else {}
         for label in aseg:
             lines.append(row(label, aseg.get(label), bseg.get(label)))
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# multi-season aggregation (the CLI `replay --test-seasons ...` loop)
+# --------------------------------------------------------------------------
+
+def _combine_metrics(metrics: list[dict | None]) -> dict | None:
+    """n-weighted mean of segment/stat metric dicts; skill recomputed from the
+    combined MAEs (a mean of ratios would over-weight small seasons)."""
+    ms = [m for m in metrics if m]
+    if not ms:
+        return None
+    n = sum(m["n"] for m in ms)
+    out: dict = {"n": n}
+    keys = [k for k in ms[0] if k not in ("n", "skill_vs_naive", "pinball_by_q")]
+    for k in keys:
+        vals = [(m[k], m["n"]) for m in ms if isinstance(m.get(k), (int, float))]
+        if vals:
+            out[k] = round(sum(v * w for v, w in vals) / sum(w for _, w in vals), 3)
+    if out.get("mae_naive"):
+        out["skill_vs_naive"] = round(1.0 - out["mae_p50"] / out["mae_naive"], 3)
+    if all("pinball_by_q" in m for m in ms):
+        out["pinball_by_q"] = {
+            qk: round(sum(m["pinball_by_q"][qk] * m["n"] for m in ms) / n, 3)
+            for qk in ms[0]["pinball_by_q"]}
+    return out
+
+
+def aggregate_reports(reports: list[dict]) -> dict:
+    """Combine several seasons' replay reports into one (n-weighted) report:
+    per-variant scorecards (overall + segments) and per-position stat tables."""
+    seasons = [r["test_season"] for r in reports]
+    variant_names = list(dict.fromkeys(
+        n for r in reports for n in r.get("scorecard", {}).get("variants", {})))
+    primary = reports[0].get("primary_variant") or (variant_names[0] if variant_names else None)
+
+    scorecards: dict = {}
+    for name in variant_names:
+        cards = [r["scorecard"]["variants"].get(name) for r in reports
+                 if name in r.get("scorecard", {}).get("variants", {})]
+        combined = {"overall": _combine_metrics([c.get("overall") for c in cards]),
+                    "segments": {}}
+        for card in cards:
+            for group, seg in card.get("segments", {}).items():
+                for label in seg:
+                    combined["segments"].setdefault(group, {}).setdefault(label, [])
+        for group, labels in combined["segments"].items():
+            for label in labels:
+                combined["segments"][group][label] = _combine_metrics(
+                    [c.get("segments", {}).get(group, {}).get(label) for c in cards])
+        scorecards[name] = combined
+
+    players: dict = {}
+    for name in variant_names:
+        by_pos: dict = {}
+        for r in reports:
+            for pos, stats in r.get("players_by_variant", {}).get(name, {}).items():
+                for stat, m in stats.items():
+                    by_pos.setdefault(pos, {}).setdefault(stat, []).append(m)
+        players[name] = {pos: {stat: _combine_metrics(ms) for stat, ms in stats.items()}
+                         for pos, stats in by_pos.items()}
+
+    return {"test_seasons": seasons, "primary_variant": primary,
+            "scorecard": {"primary": primary, "variants": scorecards},
+            "players": players}
+
+
+def format_aggregate(agg: dict, reports: list[dict]) -> str:
+    """Render the combined multi-season table: per-variant fantasy-points
+    metrics per season plus the n-weighted aggregate."""
+    seasons = agg["test_seasons"]
+    lines = [
+        f"\nMULTI-SEASON REPLAY — seasons {seasons[0]}–{seasons[-1]} · fantasy points (overall)",
+        f"{'variant':8} {'season':>7} {'n':>6} {'MAE':>7} {'skill':>8} {'cov80':>6} {'cov50':>6} {'pinball':>8}",
+    ]
+
+    def row(name, season, m):
+        if not m:
+            return f"{name:8} {season:>7} {'—':>6}"
+        skill = f"{m['skill_vs_naive']:+.1%}" if m.get("skill_vs_naive") is not None else "—"
+        return (f"{name:8} {season:>7} {m['n']:>6} {m['mae_p50']:>7.2f} {skill:>8}"
+                f" {m.get('coverage80', float('nan')):>6.0%}"
+                f" {m.get('coverage50', float('nan')):>6.0%}"
+                f" {m.get('pinball', float('nan')):>8.3f}")
+
+    for name in agg["scorecard"]["variants"]:
+        for r in reports:
+            card = r.get("scorecard", {}).get("variants", {}).get(name)
+            lines.append(row(name, r["test_season"], card and card.get("overall")))
+        lines.append(row(name, "ALL", agg["scorecard"]["variants"][name]["overall"]))
+        lines.append("")
     return "\n".join(lines)

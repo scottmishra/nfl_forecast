@@ -7,6 +7,8 @@ targets — they become the inference set.
 
 Feature groups:
   * player form   — trailing 3/8-game means of each stat + usage (targets/carries)
+  * temporal      — EWMs / lags / momentum / volatility per stat, usage, and
+                    usage share (see features/temporal.py)
   * opponent      — rolling fantasy points the defense allows to this position,
                     rolling points allowed overall
   * team          — rolling points scored by the player's own offense
@@ -18,6 +20,7 @@ Feature groups:
 from __future__ import annotations
 
 import logging
+import re
 
 import numpy as np
 import pandas as pd
@@ -25,10 +28,24 @@ import pandas as pd
 from gameday.config import POSITION_STATS, FORM_WINDOWS
 from gameday.data.teams import TEAMS, travel_km
 from gameday.data import social
+from gameday.features.temporal import add_temporal, temporal_feature_names
 
 log = logging.getLogger(__name__)
 
+# Contract with downstream consumers (bundling/refresh): bumped whenever the
+# emitted feature schema changes shape. v2 = temporal + usage-share families.
+FEATURE_SCHEMA_VERSION = 2
+
 USAGE_COLS = ["attempts", "carries", "targets"]
+
+# Usage-share columns kept from nflverse (absent on demo/synthetic data — the
+# temporal builder and feature selection both skip what isn't present).
+SHARE_COLS = ["target_share", "air_yards_share", "wopr", "racr"]
+
+# Feature families the engines should hand to LightGBM as raw NaN rather than
+# median-fill: a missing lag/EWM means "no history yet" and a missing prior-
+# season rank means "wasn't in the league" — both are signal.
+NATIVE_NAN_PATTERN = re.compile(r"_(?:ewm\d+|lag\d+|slope|vol\d+)$|^pos_rank_prev$")
 
 
 def _recent_roster(player_weeks: pd.DataFrame, team: str) -> list[tuple]:
@@ -129,6 +146,24 @@ def build_features(
         for w in FORM_WINDOWS:
             df[f"{stat}_r{w}"] = grp[stat].transform(lambda s, w=w: _roll(s, w))
     df["games_played"] = grp.cumcount()
+
+    # --- temporal form (EWMs / lags / momentum / volatility) -------------
+    # Same shift(1) leakage rule as _roll; missing columns (e.g. shares on
+    # demo data) are skipped inside add_temporal.
+    df = add_temporal(df, all_stats + USAGE_COLS + SHARE_COLS)
+
+    # --- prior-season positional finish rank (vintage-safe) ---------------
+    # Rank 1 = the position's top fantasy scorer over the PREVIOUS completed
+    # season, joined onto the following season's rows — known before week 1,
+    # never touched by current-season results. NaN = no prior season at this
+    # position (rookies, position switches), which the GBM reads natively.
+    totals = (player_weeks.groupby(["season", "position", "player_id"], as_index=False)
+              ["fantasy_points"].sum())
+    totals["pos_rank_prev"] = (totals.groupby(["season", "position"])["fantasy_points"]
+                               .rank(ascending=False, method="min"))
+    totals["season"] = totals["season"] + 1
+    df = df.merge(totals[["season", "position", "player_id", "pos_rank_prev"]],
+                  on=["season", "position", "player_id"], how="left")
 
     # --- team / opponent context ----------------------------------------
     grid = _team_week_grid(games).sort_values(["team", "season", "week"])
@@ -243,11 +278,20 @@ def _add_roster_features(df: pd.DataFrame, rosters: pd.DataFrame | None) -> pd.D
 
 
 def feature_columns(position: str, df: pd.DataFrame,
-                    include_adjustments: bool = True) -> list[str]:
+                    include_adjustments: bool = True,
+                    feature_set: str = "v2") -> list[str]:
     """Model inputs for a position: its stat-form columns + shared context.
 
     `include_adjustments` toggles the season-to-season roster features so the
-    replay harness can score the model with and without them (before/after)."""
+    replay harness can score the model with and without them (before/after).
+
+    `feature_set` picks the schema generation for variant A/B replays:
+      "v1" — pre-temporal columns (r3/r8 form + context + adjustments)
+      "v2" — v1 plus the temporal families (EWM/lag/slope/vol) for the
+             position's stats and usage, the usage-share families for
+             pass-catching positions (RB/WR/TE — a QB's own target share
+             carries no signal), and the prior-season positional finish
+             rank (pos_rank_prev)."""
     stats = POSITION_STATS[position]
     cols: list[str] = []
     for stat in stats + USAGE_COLS:
@@ -262,4 +306,10 @@ def feature_columns(position: str, df: pd.DataFrame,
     ]
     if include_adjustments:
         cols += ADJUSTMENT_COLS
+    if feature_set != "v1":
+        temporal_base = stats + USAGE_COLS
+        if position != "QB":
+            temporal_base = temporal_base + SHARE_COLS
+        cols += temporal_feature_names(temporal_base)
+        cols.append("pos_rank_prev")
     return [c for c in dict.fromkeys(cols) if c in df.columns]
