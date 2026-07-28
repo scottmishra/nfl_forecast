@@ -11,7 +11,8 @@ DATA_DIR = Path(os.environ.get("GAMEDAY_DATA_DIR", ROOT / "data"))
 RAW_DIR = DATA_DIR / "raw"
 FEATURES_DIR = DATA_DIR / "features"
 ARTIFACTS_DIR = Path(os.environ.get("GAMEDAY_ARTIFACTS_DIR", ROOT / "artifacts"))
-MODELS_DIR = ARTIFACTS_DIR / "models"
+MODELS_ROOT = ARTIFACTS_DIR / "models"  # bundle installs swap current/previous here
+MODELS_DIR = MODELS_ROOT / "current"    # the active model set engines read/write
 FORECASTS_DIR = ARTIFACTS_DIR / "forecasts"
 
 # Offensive skill positions we model, and the stat lines forecast for each.
@@ -28,6 +29,12 @@ QUANTILES = [0.10, 0.25, 0.50, 0.75, 0.90]
 
 # Rolling windows (in games) used for player-form and opponent-quality features.
 FORM_WINDOWS = (3, 8)
+
+# Packaging gate (`gameday train --gate`): refuse to ship a bundle whose
+# backtest shows no skill vs the naive baseline or badly mis-calibrated 80%
+# intervals. Lenient on purpose — this catches broken models, not mediocre ones.
+GATE_MIN_SKILL = 0.0
+GATE_COVERAGE80 = (0.70, 0.90)
 
 
 @dataclass
