@@ -36,6 +36,12 @@ FORM_WINDOWS = (3, 8)
 GATE_MIN_SKILL = 0.0
 GATE_COVERAGE80 = (0.70, 0.90)
 
+# Usage columns exported to artifacts/forecasts/latest_usage.parquet after a
+# refresh (filtered to whichever exist in the feature frame) — the dashboard's
+# player usage sparklines read them via /api/player/{id}/usage.
+USAGE_ARTIFACT_COLS = ["attempts", "carries", "targets", "target_share",
+                       "air_yards_share", "wopr", "racr"]
+
 
 @dataclass
 class GBMParams:

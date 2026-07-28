@@ -28,7 +28,7 @@ import pandas as pd
 
 from gameday import bundle, pipeline
 from gameday.config import (ARTIFACTS_DIR, FORECASTS_DIR, MODELS_ROOT, ROOT,
-                            ensure_dirs, settings)
+                            USAGE_ARTIFACT_COLS, ensure_dirs, settings)
 from gameday.data import nflverse, releases
 
 log = logging.getLogger(__name__)
@@ -95,6 +95,28 @@ def _offseason_reason(games: pd.DataFrame, horizon_days: int) -> str | None:
     return None
 
 
+def _emit_usage_artifact(feats: pd.DataFrame, result: pd.DataFrame) -> None:
+    """Best-effort: each slate player's last-8-played-weeks usage rows
+    (USAGE_ARTIFACT_COLS, filtered to those present) -> latest_usage.parquet
+    for the dashboard sparklines. Never fails the refresh."""
+    try:
+        cols = [c for c in USAGE_ARTIFACT_COLS if c in feats.columns]
+        if not cols or result.empty:
+            return
+        hist = feats[feats["fantasy_points"].notna()
+                     & feats["player_id"].isin(result["player_id"])]
+        hist = hist.sort_values(["player_id", "season", "week"]).groupby("player_id").tail(8)
+        out = hist[["player_id", "season", "week"] + cols].reset_index(drop=True)
+        path = FORECASTS_DIR / "latest_usage.parquet"
+        tmp = path.with_name(f".tmp-{os.getpid()}-{path.name}")
+        out.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
+        log.info("wrote usage artifact: %d rows / %d players",
+                 len(out), out["player_id"].nunique())
+    except Exception as exc:  # noqa: BLE001 — cosmetic artifact only
+        log.warning("usage artifact skipped (%s)", exc)
+
+
 def run_refresh(horizon_days: int = 8, sims: int = 300, sync: bool = True,
                 pointer: Path = DEFAULT_POINTER, live_weather: bool = False) -> int:
     """One full refresh cycle; returns a process exit code (0 = success/skip)."""
@@ -148,6 +170,7 @@ def run_refresh(horizon_days: int = 8, sims: int = 300, sync: bool = True,
             "model_version": manifest.get("version"),
             "data_versions": releases.data_versions(),
         })
+        _emit_usage_artifact(data.feats, result)  # best-effort, never fatal
         status["ok"] = True
         log.info("refresh complete: %d forecasts, models %s",
                  len(result), manifest.get("version"))
