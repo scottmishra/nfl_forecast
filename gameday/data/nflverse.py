@@ -32,6 +32,7 @@ STAT_COLUMNS = [
     "opponent_team", "completions", "attempts", "passing_yards", "passing_tds",
     "passing_interceptions", "carries", "rushing_yards", "rushing_tds", "receptions",
     "targets", "receiving_yards", "receiving_tds", "fantasy_points_ppr",
+    "target_share", "air_yards_share", "wopr", "racr",
 ]
 
 

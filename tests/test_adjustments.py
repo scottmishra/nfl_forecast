@@ -91,6 +91,44 @@ def test_scorecard_has_baseline_and_segments(replay_report):
         assert group in sc["adjusted"]["segments"]
 
 
+def test_scorecard_named_variants(replay_report):
+    """Variant A/B: both named variants are scored, the legacy adjusted/
+    baseline keys alias the primary/comparison, and the new interval metrics
+    are present."""
+    sc = replay_report["scorecard"]
+    assert sc["primary"] == "v2"
+    assert set(sc["variants"]) == {"v2", "v1"}
+    assert sc["adjusted"] == sc["variants"]["v2"]
+    assert sc["baseline"] == sc["variants"]["v1"]
+    for card in sc["variants"].values():
+        assert {"coverage80", "coverage50", "interval_width80", "pinball"} \
+            <= set(card["overall"])
+
+
+def test_variants_parquet_written(replay_report):
+    df = pd.read_parquet(bt.REPLAY_DIR / "2025" / "variants.parquet")
+    assert set(df["variant"]) == {"v2", "v1"}
+    assert set(df["engine"]) == {"gbm"}
+
+
+def test_players_parquet_stays_single_variant(replay_report):
+    """The dashboard contract: one row per player-week (primary variant)."""
+    df = pd.read_parquet(bt.REPLAY_DIR / "2025" / "players.parquet")
+    assert set(df["variant"]) == {"v2"}
+    assert not df.duplicated(["player_id", "season", "week"]).any()
+
+
+def test_aggregate_reports(replay_report):
+    """n-weighted multi-season combination reproduces a repeated season."""
+    agg = bt.aggregate_reports([replay_report, replay_report])
+    single = replay_report["scorecard"]["variants"]["v2"]["overall"]
+    combined = agg["scorecard"]["variants"]["v2"]["overall"]
+    assert combined["n"] == 2 * single["n"]
+    assert combined["mae_p50"] == pytest.approx(single["mae_p50"], abs=1e-6)
+    text = bt.format_aggregate(agg, [replay_report, replay_report])
+    assert "MULTI-SEASON" in text and "ALL" in text
+
+
 def test_replay_artifacts_written(replay_report):
     sdir = bt.REPLAY_DIR / "2025"
     assert (sdir / "players.parquet").exists()

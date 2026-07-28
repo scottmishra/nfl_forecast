@@ -41,6 +41,11 @@ class GBMParams:
     subsample: float = 0.9
     colsample_bytree: float = 0.8
     reg_lambda: float = 1.0
+    # Post-training prune: keep the top-K features per position by total gain
+    # importance and retrain on that list (None = keep every feature). QB/TE
+    # have thinner rows-per-feature ratios, so they prune by default.
+    top_k_features: dict = field(
+        default_factory=lambda: {"QB": 60, "RB": None, "WR": None, "TE": 60})
 
 
 @dataclass

@@ -82,29 +82,41 @@ def backtest(
 @app.command()
 def replay(
     season: int = typer.Option(0, help="season to replay (default: latest played)"),
+    test_seasons: str = typer.Option("", help="comma-separated seasons to replay in turn, e.g. 2022,2023,2024,2025 (overrides --season)"),
     seasons: str = typer.Option("", help="history to train on, e.g. 2019,2020,...,2024 (default: config seasons)"),
     weeks: str = typer.Option("", help="weeks to replay, e.g. 1-8 or 1,3,5 (default: all)"),
     engine: str = typer.Option("gbm", help="gbm | neural"),
     sims: int = typer.Option(0, help="game-sim replicates per historical game (0 = skip sims, faster)"),
-    compare: bool = typer.Option(True, help="also score WITHOUT the season-to-season adjustments (before/after)"),
+    compare: bool = typer.Option(True, help="also score the previous feature schema (v1) so the scorecard shows the new-vs-old lift"),
 ):
-    """Historical replay + season-to-season validation.
+    """Historical replay + model-variant validation.
 
-    Replays a past season out-of-sample and writes per-player forecast-vs-actual
+    Replays past seasons out-of-sample and writes per-player forecast-vs-actual
     rows and a scenario scorecard to artifacts/replay/{season} for the dashboard
-    Replay view. With --compare it also scores the model without the
-    season-to-season adjustment features, so the scorecard shows the lift.
+    Replay view. By default the current feature schema (v2) is scored against
+    the previous one (v1); --no-compare scores v2 alone (faster). With
+    --test-seasons the replay loops several seasons and prints an n-weighted
+    combined report at the end; each season's artifacts persist as usual.
     """
     from gameday import backtest as bt
 
     hist = [int(s) for s in seasons.split(",") if s] or None
-    report = bt.run_backtest(
-        source="nflverse", seasons=hist, test_season=season or None,
-        weeks=_parse_weeks(weeks), n_sims=sims, engine=engine,
-        compare=compare, persist_replay=True,
-    )
-    typer.echo(bt.format_scorecard(report))
-    typer.echo(bt.format_report(report))
+    targets = [int(s) for s in test_seasons.split(",") if s] or [season or None]
+    variants = None if compare else [dict(name="v2", engine=engine, feature_set="v2")]
+
+    reports = []
+    for ts in targets:
+        report = bt.run_backtest(
+            source="nflverse", seasons=hist, test_season=ts,
+            weeks=_parse_weeks(weeks), n_sims=sims, engine=engine,
+            persist_replay=True, variants=variants,
+        )
+        typer.echo(bt.format_scorecard(report))
+        typer.echo(bt.format_report(report))
+        reports.append(report)
+
+    if len(reports) > 1:
+        typer.echo(bt.format_aggregate(bt.aggregate_reports(reports), reports))
 
 
 @app.command()
