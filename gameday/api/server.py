@@ -19,8 +19,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from gameday.config import (ARTIFACTS_DIR, FORECASTS_DIR, POSITION_STATS,
-                            QUANTILES, ROOT)
+from gameday import bundle
+from gameday.config import (ARTIFACTS_DIR, FORECASTS_DIR, MODELS_ROOT,
+                            POSITION_STATS, QUANTILES, ROOT)
 from gameday.data.teams import TEAMS
 
 app = FastAPI(title="Gameday Forecaster", version="0.1.0")
@@ -110,6 +111,22 @@ def _player_payload(row: pd.Series) -> dict:
     })
 
 
+def _forecast_meta() -> dict | None:
+    """latest_meta.json (live, else demo fixture), minus the bulky data_versions."""
+    live = FORECASTS_DIR / "latest_meta.json"
+    demo = DEMO_DIR / "latest_meta.json"
+
+    def loader():
+        path = live if live.exists() else demo
+        if not path.exists():
+            return None
+        meta = json.loads(path.read_text())
+        meta.pop("data_versions", None)
+        return meta
+
+    return _mtime_cached("meta", [live, demo], loader)
+
+
 @app.get("/api/slate")
 def slate():
     forecasts, games = _load()
@@ -128,7 +145,7 @@ def slate():
             "wind_kph": None if pd.isna(g.get("wind")) else float(g.get("wind")),
             "headliners": top,
         }))
-    return {"games": out}
+    return {"games": out, "meta": _forecast_meta()}
 
 
 @app.get("/api/game/{game_id}")
@@ -185,7 +202,53 @@ def players(q: str = ""):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    """Liveness plus deployment introspection: which models are installed,
+    what the served forecasts are, and how the last refresh went. Every block
+    is null on a fresh clone; "ok" stays a plain liveness bool."""
+    manifest = _mtime_cached(
+        "health:model", [MODELS_ROOT / "current" / "manifest.json"],
+        lambda: bundle.installed_manifest(MODELS_ROOT))
+    model = None
+    if manifest:
+        model = {k: manifest.get(k) for k in
+                 ("version", "engine", "git_sha", "created_at", "train_seasons", "metrics")}
+
+    forecasts = None
+    meta = _forecast_meta()
+    if meta:
+        forecasts = {k: meta.get(k) for k in
+                     ("generated_at", "as_of", "season", "week",
+                      "n_players", "n_games", "model_version")}
+
+    status_path = FORECASTS_DIR / "refresh_status.json"
+    status = _mtime_cached(
+        "health:refresh", [status_path],
+        lambda: json.loads(status_path.read_text()) if status_path.exists() else None)
+    refresh = None
+    if status:
+        refresh = {k: status.get(k) for k in
+                   ("started_at", "finished_at", "ok", "skipped_reason",
+                    "stage_failed", "error")}
+
+    return {"ok": True, "model": model, "forecasts": forecasts, "refresh": refresh}
+
+
+@app.get("/api/player/{player_id}/usage")
+def player_usage(player_id: str):
+    """Recent usage rows (volume/share columns) for one slate player — long
+    format, one row per (season, week). Feeds the dashboard sparklines."""
+    path = FORECASTS_DIR / "latest_usage.parquet"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="No usage artifact yet — it appears after the next `gameday refresh`.",
+        )
+    df = _mtime_cached("usage", [path], lambda: pd.read_parquet(path))
+    rows = df[df["player_id"] == player_id].sort_values(["season", "week"])
+    if rows.empty:
+        raise HTTPException(status_code=404, detail=f"no usage rows for player {player_id}")
+    cols = [c for c in rows.columns if c != "player_id"]
+    return {"player_id": player_id, "weeks": _clean(rows[cols].to_dict("records"))}
 
 
 # --------------------------------------------------------------------------
