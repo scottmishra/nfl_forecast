@@ -12,6 +12,9 @@ import tarfile
 import pytest
 
 from gameday import bundle
+from gameday.features import build as feature_build
+
+LOCAL_SCHEMA = getattr(feature_build, "FEATURE_SCHEMA_VERSION", 1)
 
 QB_TXT = "gbm_QB_fantasy_points_q50.txt"
 RB_TXT = "gbm_RB_fantasy_points_q50.txt"
@@ -40,7 +43,7 @@ def test_pack_verify_roundtrip(models_dir, tmp_path):
     assert manifest["positions"]["QB"]["n_features"] == 3
     assert set(manifest["files"]) == {
         f"models/{QB_TXT}", f"models/{RB_TXT}", "models/manifest_QB.json"}
-    assert manifest["feature_schema_version"] == 1  # getattr default pre-constant
+    assert manifest["feature_schema_version"] == LOCAL_SCHEMA  # stamps the live constant
 
 
 def test_verify_rejects_tampered_member(models_dir, tmp_path):
@@ -93,9 +96,7 @@ def test_rollback_without_previous_raises(tmp_path):
 
 
 def test_incompatible_feature_schema_rejected(models_dir, tmp_path, monkeypatch):
-    from gameday.features import build as feature_build
-
-    b1 = bundle.pack(models_dir, tmp_path / "bundles")
+    b1 = bundle.pack(models_dir, tmp_path / "bundles")  # stamped with LOCAL_SCHEMA
     manifest = bundle.verify(b1)
     manifest["feature_schema_version"] = 999
     with pytest.raises(ValueError, match="feature_schema_version"):
@@ -103,7 +104,8 @@ def test_incompatible_feature_schema_rejected(models_dir, tmp_path, monkeypatch)
 
     # install() must refuse and leave nothing behind when local code moved on
     root = tmp_path / "models"
-    monkeypatch.setattr(feature_build, "FEATURE_SCHEMA_VERSION", 2, raising=False)
+    monkeypatch.setattr(feature_build, "FEATURE_SCHEMA_VERSION",
+                        LOCAL_SCHEMA + 1, raising=False)
     with pytest.raises(ValueError, match="feature_schema_version"):
         bundle.install(b1, root)
     assert not (root / "current").exists()
