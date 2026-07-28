@@ -6,6 +6,15 @@
 <title>Gameday Edge — NFL Forecaster</title>
 <link rel="stylesheet" href="/static/styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏈</text></svg>">
+<style>
+  /* deployment meta + usage sparklines (kept local: additive dashboard bits) */
+  .meta-line { padding: 4px 28px 0; font-size: 12px; color: var(--ink-3, #8b93a7); letter-spacing: .02em; }
+  .usage-btn { margin-left: auto; border: 0; background: none; cursor: pointer; font-size: 13px; opacity: .55; }
+  .usage-btn:hover { opacity: 1; }
+  .usage-box { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; color: var(--ink-3, #8b93a7); }
+  .usage-box[hidden] { display: none; }
+  .usage-box .spark { color: var(--ink-2, #b8c0d4); flex: none; }
+</style>
 </head>
 <body data-palette="#3987e5,#008300,#d55181,#c98500">
 <div class="field-lines" aria-hidden="true"></div>
@@ -26,6 +35,7 @@
     <div id="search-results" class="search-results" hidden></div>
   </div>
 </header>
+<div class="meta-line" id="meta-line" hidden></div>
 
 <main id="view" class="view">
   <div class="loading" id="loading">

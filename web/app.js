@@ -47,6 +47,17 @@ function teamLogo(team, cls = "") {
   return `<span class="team-logo ${cls}" style="--team-color:${esc(team.primary)}">${esc(team.abbr)}</span>`;
 }
 
+function renderMetaLine(meta) {
+  const line = document.getElementById("meta-line");
+  if (!line) return;
+  const bits = [];
+  if (meta?.week != null) bits.push(`Week ${meta.week} ${meta.season}`);
+  if (meta?.engine) bits.push(meta.model_version ? `${meta.engine} ${meta.model_version}` : meta.engine);
+  if (meta?.generated_at) bits.push(`refreshed ${String(meta.generated_at).replace("T", " ").slice(0, 16)} UTC`);
+  line.textContent = bits.join(" · ");
+  line.hidden = !bits.length;
+}
+
 /* ---------- slate view ---------- */
 
 async function renderSlate() {
@@ -61,6 +72,7 @@ async function renderSlate() {
   if (games.length) {
     weekPill.textContent = `Week ${games[0].week} · ${games[0].season}`;
   }
+  renderMetaLine(data.meta);
   view.innerHTML = `
     <div class="section-title">This Week's Slate — ${games.length} games</div>
     <div class="slate-grid">
@@ -138,8 +150,8 @@ async function renderGame(gameId) {
       </nav>` : ""}
     <div id="panel-forecasts" class="tab-panel">
       <div class="teams-cols">
-        ${teamColumn(g.away)}
-        ${teamColumn(g.home)}
+        ${teamColumn(g.away, true)}
+        ${teamColumn(g.home, true)}
       </div>
     </div>
     ${sim ? `<div id="panel-sim" class="tab-panel" hidden>${simPanel(g, sim)}</div>` : ""}`;
@@ -153,6 +165,7 @@ async function renderGame(gameId) {
       });
     }));
   bindStripTooltips();
+  bindUsageSparks();
 }
 
 /* ---------- simulation panel ---------- */
@@ -270,30 +283,90 @@ function simTeamCol(team, s) {
     </div>`;
 }
 
-function teamColumn(block) {
+function teamColumn(block, withUsage = false) {
   const t = block.team;
   return `
     <div>
       <div class="team-col-head" style="--team-color:${esc(t.primary)}">
         ${teamLogo(t)}<h3>${esc(t.name)}</h3>
       </div>
-      ${block.players.map(playerCard).join("") || `<p style="color:var(--ink-3)">No forecastable players.</p>`}
+      ${block.players.map((p) => playerCard(p, withUsage)).join("")
+        || `<p style="color:var(--ink-3)">No forecastable players.</p>`}
     </div>`;
 }
 
-function playerCard(p) {
+function playerCard(p, withUsage = false) {
   const tag = p.is_rookie ? `<span class="ptag ptag-rookie">Rookie</span>`
     : p.is_new_team ? `<span class="ptag ptag-new">New team</span>` : "";
   return `
-    <article class="player-card" data-player-id="${esc(p.player_id)}">
+    <article class="player-card" data-player-id="${esc(p.player_id)}" data-position="${esc(p.position)}">
       <div class="player-head">
         <span class="pos-badge pos-${esc(p.position)}">${esc(p.position)}</span>
         <span class="player-name">${esc(p.name)}</span>
         ${tag}
         <span class="player-sub">${p.is_home ? "vs" : "@"} ${esc(p.opponent)}</span>
+        ${withUsage ? `<button class="usage-btn" title="Usage trend" aria-label="Usage trend for ${esc(p.name)}">📈</button>` : ""}
       </div>
       ${p.forecasts.map((f) => statRow(p, f)).join("")}
+      ${withUsage ? `<div class="usage-box" hidden></div>` : ""}
     </article>`;
+}
+
+/* ---------- usage sparkline (fetch on expand; hidden quietly on 404) ---------- */
+
+const USAGE_METRIC = { QB: "attempts", RB: "carries", WR: "targets", TE: "targets" };
+const USAGE_LABELS = { attempts: "pass att", carries: "carries", targets: "targets" };
+
+function sparklineSVG(values, w = 130, h = 30) {
+  if (values.length < 2) return "";
+  const max = Math.max(...values), min = Math.min(...values);
+  const span = max - min || 1;
+  const pts = values.map((v, i) => {
+    const x = 2 + (i / (values.length - 1)) * (w - 4);
+    const y = h - 3 - ((v - min) / span) * (h - 8);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const [lx, ly] = pts[pts.length - 1].split(",");
+  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">
+      <polyline points="${pts.join(" ")}" fill="none" stroke="currentColor"
+                stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${lx}" cy="${ly}" r="2.4" fill="currentColor"/>
+    </svg>`;
+}
+
+function bindUsageSparks() {
+  view.querySelectorAll(".player-card .usage-btn").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".player-card");
+      const box = card.querySelector(".usage-box");
+      if (!box) return;
+      if (!box.hidden) { box.hidden = true; return; }
+      box.hidden = false;
+      if (box.dataset.loaded) return;
+      box.innerHTML = `<span>loading usage…</span>`;
+      try {
+        const data = await api(`/api/player/${encodeURIComponent(card.dataset.playerId)}/usage`);
+        box.dataset.loaded = "1";
+        const metric = USAGE_METRIC[card.dataset.position] || "targets";
+        const rows = (data.weeks || []).filter((r) => r[metric] != null);
+        if (rows.length < 2) {
+          box.innerHTML = `<span>not enough usage history</span>`;
+          return;
+        }
+        const vals = rows.map((r) => Number(r[metric]));
+        const last = rows[rows.length - 1];
+        box.innerHTML = `
+          ${sparklineSVG(vals)}
+          <span>${esc(USAGE_LABELS[metric] || metric)} · last ${rows.length} wks ·
+            latest ${fmt(vals[vals.length - 1], 0)} (wk ${esc(last.week)})</span>`;
+      } catch {
+        // no artifact / no rows for this player — hide the affordance quietly
+        box.hidden = true;
+        btn.remove();
+      }
+    });
+  });
 }
 
 function statRow(p, f) {
