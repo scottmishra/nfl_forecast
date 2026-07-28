@@ -263,6 +263,11 @@ def _segment_metrics(df: pd.DataFrame | None) -> dict | None:
     }
 
 
+# Tier 1 = a "startable star" by last season's positional fantasy finish;
+# tier 2 is the next tranche of the same size, tier 3 everyone ranked below.
+TIER1_PREV_RANK = {"QB": 10, "RB": 12, "WR": 12, "TE": 8}
+
+
 def _segments(df: pd.DataFrame):
     """Yield (group, label, subframe) slices used by the scorecard."""
     wk = pd.to_numeric(df.get("week"), errors="coerce")
@@ -277,6 +282,13 @@ def _segments(df: pd.DataFrame):
     newt = pd.to_numeric(df.get("is_new_team"), errors="coerce").fillna(0)
     yield "team", "changed team", df[newt == 1]
     yield "team", "same team", df[newt == 0]
+    if "pos_rank_prev" in df and "position" in df:
+        rank = pd.to_numeric(df["pos_rank_prev"], errors="coerce")
+        cut = df["position"].map(TIER1_PREV_RANK).astype(float)
+        yield "tier", "tier1 (stars)", df[rank <= cut]
+        yield "tier", "tier2", df[(rank > cut) & (rank <= 2 * cut)]
+        yield "tier", "tier3 (rest)", df[rank > 2 * cut]
+        yield "tier", "no prior season", df[rank.isna()]
 
 
 def _scorecard_for(df: pd.DataFrame) -> dict:
@@ -311,7 +323,7 @@ def _scenario_scorecard(frames: dict[str, pd.DataFrame], primary: str) -> dict:
 def _replay_columns(df: pd.DataFrame) -> pd.DataFrame:
     ident = ["player_id", "player_display_name", "position", "team", "opponent_team",
              "is_home", "season", "week", "game_id", "engine", "variant",
-             "years_exp", "age", "is_rookie", "is_new_team"]
+             "years_exp", "age", "is_rookie", "is_new_team", "pos_rank_prev"]
     all_stats = sorted({s for v in POSITION_STATS.values() for s in v})
     stat_cols = [f"{stat}{suf}" for stat in all_stats
                  for suf in ("", "_p10", "_p25", "_p50", "_p75", "_p90", "_r8")]
@@ -505,7 +517,9 @@ def format_scorecard(report: dict) -> str:
         return out
 
     lines.append(row("OVERALL", adj.get("overall"), base.get("overall") if base else None))
-    for group in ("phase", "experience", "team"):
+    for group in ("phase", "experience", "team", "tier"):
+        if group not in adj.get("segments", {}):
+            continue
         lines.append(f"— {group} —")
         aseg = adj.get("segments", {}).get(group, {})
         bseg = base.get("segments", {}).get(group, {}) if base else {}

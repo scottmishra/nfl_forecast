@@ -105,6 +105,16 @@ def test_scorecard_named_variants(replay_report):
             <= set(card["overall"])
 
 
+def test_tier_segment_present(replay_report):
+    """Prev-season positional-rank tiers slice the scorecard; the demo league
+    plays 2024 before the replayed 2025, so ranked tiers are populated."""
+    for card in replay_report["scorecard"]["variants"].values():
+        tiers = card["segments"]["tier"]
+        assert set(tiers) == {"tier1 (stars)", "tier2", "tier3 (rest)",
+                              "no prior season"}
+        assert tiers["tier1 (stars)"] and tiers["tier1 (stars)"]["n"] > 0
+
+
 def test_variants_parquet_written(replay_report):
     df = pd.read_parquet(bt.REPLAY_DIR / "2025" / "variants.parquet")
     assert set(df["variant"]) == {"v2", "v1"}

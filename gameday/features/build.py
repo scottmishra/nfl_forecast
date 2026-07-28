@@ -43,8 +43,9 @@ USAGE_COLS = ["attempts", "carries", "targets"]
 SHARE_COLS = ["target_share", "air_yards_share", "wopr", "racr"]
 
 # Feature families the engines should hand to LightGBM as raw NaN rather than
-# median-fill: a missing lag/EWM means "no history yet", which is signal.
-NATIVE_NAN_PATTERN = re.compile(r"_(?:ewm\d+|lag\d+|slope|vol\d+)$")
+# median-fill: a missing lag/EWM means "no history yet" and a missing prior-
+# season rank means "wasn't in the league" — both are signal.
+NATIVE_NAN_PATTERN = re.compile(r"_(?:ewm\d+|lag\d+|slope|vol\d+)$|^pos_rank_prev$")
 
 
 def _recent_roster(player_weeks: pd.DataFrame, team: str) -> list[tuple]:
@@ -150,6 +151,19 @@ def build_features(
     # Same shift(1) leakage rule as _roll; missing columns (e.g. shares on
     # demo data) are skipped inside add_temporal.
     df = add_temporal(df, all_stats + USAGE_COLS + SHARE_COLS)
+
+    # --- prior-season positional finish rank (vintage-safe) ---------------
+    # Rank 1 = the position's top fantasy scorer over the PREVIOUS completed
+    # season, joined onto the following season's rows — known before week 1,
+    # never touched by current-season results. NaN = no prior season at this
+    # position (rookies, position switches), which the GBM reads natively.
+    totals = (player_weeks.groupby(["season", "position", "player_id"], as_index=False)
+              ["fantasy_points"].sum())
+    totals["pos_rank_prev"] = (totals.groupby(["season", "position"])["fantasy_points"]
+                               .rank(ascending=False, method="min"))
+    totals["season"] = totals["season"] + 1
+    df = df.merge(totals[["season", "position", "player_id", "pos_rank_prev"]],
+                  on=["season", "position", "player_id"], how="left")
 
     # --- team / opponent context ----------------------------------------
     grid = _team_week_grid(games).sort_values(["team", "season", "week"])
@@ -274,9 +288,10 @@ def feature_columns(position: str, df: pd.DataFrame,
     `feature_set` picks the schema generation for variant A/B replays:
       "v1" — pre-temporal columns (r3/r8 form + context + adjustments)
       "v2" — v1 plus the temporal families (EWM/lag/slope/vol) for the
-             position's stats and usage, and the usage-share families for
+             position's stats and usage, the usage-share families for
              pass-catching positions (RB/WR/TE — a QB's own target share
-             carries no signal)."""
+             carries no signal), and the prior-season positional finish
+             rank (pos_rank_prev)."""
     stats = POSITION_STATS[position]
     cols: list[str] = []
     for stat in stats + USAGE_COLS:
@@ -296,4 +311,5 @@ def feature_columns(position: str, df: pd.DataFrame,
         if position != "QB":
             temporal_base = temporal_base + SHARE_COLS
         cols += temporal_feature_names(temporal_base)
+        cols.append("pos_rank_prev")
     return [c for c in dict.fromkeys(cols) if c in df.columns]
