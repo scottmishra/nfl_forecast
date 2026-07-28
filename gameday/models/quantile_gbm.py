@@ -20,6 +20,7 @@ import pandas as pd
 
 from gameday.config import MODELS_DIR, POSITION_STATS, QUANTILES, settings
 from gameday.features.build import NATIVE_NAN_PATTERN
+from gameday.models.calibrate import apply_offsets, conformal_offsets
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +77,13 @@ def train_position(df: pd.DataFrame, position: str, feature_cols: list[str],
     by NATIVE_NAN_PATTERN) are left as raw NaN — LightGBM routes missing values
     natively, and "no history yet" is signal a median would erase.
 
-    Returns per-stat validation pinball loss on the most recent season.
+    The internal split (train on seasons before the most recent, hold out the
+    most recent) doubles as the conformal-calibration split: CQR offsets
+    computed on the holdout land in the manifest under "calibration" and are
+    applied by predict_position.
+
+    Returns per-stat validation pinball loss on the most recent season
+    (raw model output, pre-calibration).
     """
     models_dir.mkdir(parents=True, exist_ok=True)
     stats = POSITION_STATS[position]
@@ -104,17 +111,34 @@ def train_position(df: pd.DataFrame, position: str, feature_cols: list[str],
         feature_cols = pruned
         models = _fit_all(df, train_mask, position, feature_cols)
 
-    # Holdout pinball on the most recent season.
+    # Holdout pinball on the most recent season + the calibration frame
+    # (clipped, non-crossing — exactly what predict_position would emit raw).
     holdout = df[~train_mask]
     X_hold = holdout[feature_cols].astype(float)
+    hold_pred = pd.DataFrame(index=holdout.index)
     for stat in stats:
         y = holdout[stat].astype(float).values
         losses = []
-        for q in QUANTILES:
-            err = y - models[(stat, q)].predict(X_hold)
+        raw = {q: np.clip(models[(stat, q)].predict(X_hold), 0, None) for q in QUANTILES}
+        stacked = np.sort(np.column_stack([raw[q] for q in QUANTILES]), axis=1)
+        for i, q in enumerate(QUANTILES):
+            err = y - raw[q]
             losses.append(float(np.mean(np.maximum(q * err, (q - 1) * err))))
+            hold_pred[f"{stat}_p{int(q * 100):02d}"] = stacked[:, i]
         report[stat] = round(float(np.mean(losses)), 4)
         log.info("%s/%s pinball=%.3f", position, stat, report[stat])
+
+    calibration = (conformal_offsets(holdout[stats].astype(float), hold_pred, stats)
+                   if settings.calibrate and not holdout.empty else None)
+
+    # Refit on ALL rows while keeping the holdout's offsets. Strict CQR wants
+    # offsets scored against the deployed model; refitting bends that
+    # exchangeability slightly — the deployed boosters saw more data than the
+    # calibrated ones, so their raw intervals are no worse and the stored
+    # offsets err (mildly) conservative. Worth it: the point forecasts get the
+    # most recent season's rows instead of losing them to calibration.
+    if settings.refit_on_all:
+        models = _fit_all(df, pd.Series(True, index=df.index), position, feature_cols)
 
     for (stat, q), model in models.items():
         model.booster_.save_model(str(_model_path(models_dir, position, stat, q)))
@@ -122,6 +146,7 @@ def train_position(df: pd.DataFrame, position: str, feature_cols: list[str],
     _manifest_path(models_dir, position).write_text(json.dumps(
         {"position": position, "features": feature_cols, "stats": stats,
          "quantiles": QUANTILES, "validation_pinball": report,
+         "calibration": calibration,
          "fill_values": {k: (None if pd.isna(v) else float(v))
                          for k, v in fill_values.items()}}, indent=2))
     return report
@@ -131,8 +156,11 @@ def predict_position(df: pd.DataFrame, position: str,
                      models_dir: Path = MODELS_DIR) -> pd.DataFrame:
     """Quantile predictions for rows of `position`. Adds `{stat}_p{q}` columns.
 
-    NaN features are filled with the manifest's train-time medians, so
-    inference on a fresh machine matches inference next to the trainer."""
+    NaN features are filled with the manifest's train-time medians (temporal
+    families were never filled at train time, so they carry no fill value and
+    stay NaN here too). When the manifest holds conformal offsets they are
+    applied to the interval endpoints — eval and serving both see the
+    CALIBRATED band."""
     manifest = json.loads(_manifest_path(models_dir, position).read_text())
     feature_cols = manifest["features"]
     X = df[feature_cols].astype(float)
@@ -149,5 +177,13 @@ def predict_position(df: pd.DataFrame, position: str,
         # Enforce non-crossing quantiles: sort each row's quantile values.
         stacked = np.sort(np.column_stack([preds[q] for q in manifest["quantiles"]]), axis=1)
         for i, q in enumerate(manifest["quantiles"]):
-            out[f"{stat}_p{int(q * 100):02d}"] = np.round(stacked[:, i], 2)
+            out[f"{stat}_p{int(q * 100):02d}"] = stacked[:, i]
+
+    calibration = manifest.get("calibration")
+    if calibration:
+        out = apply_offsets(out, calibration, manifest["stats"])
+    for stat in manifest["stats"]:
+        for q in manifest["quantiles"]:
+            col = f"{stat}_p{int(q * 100):02d}"
+            out[col] = np.round(out[col].astype(float), 2)
     return out

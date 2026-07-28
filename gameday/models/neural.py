@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from gameday.config import MODELS_DIR, POSITION_STATS, QUANTILES, settings
+from gameday.models.calibrate import apply_offsets, conformal_offsets
 
 log = logging.getLogger(__name__)
 
@@ -53,39 +54,82 @@ def _build_net(torch, n_features: int, n_outputs: int):
     return nn.Sequential(*layers)
 
 
+def _predict_quantiles(torch, net, Xn: np.ndarray, stats: list[str]) -> pd.DataFrame:
+    """Clipped, non-crossing `{stat}_pXX` frame for normalized inputs."""
+    net.eval()
+    with torch.no_grad():
+        pred = net(torch.tensor(Xn, dtype=torch.float32)) \
+            .view(-1, len(stats), len(QUANTILES)).numpy()
+    pred = np.clip(np.sort(pred, axis=-1), 0, None)
+    out = pd.DataFrame()
+    for i, stat in enumerate(stats):
+        for j, q in enumerate(QUANTILES):
+            out[f"{stat}_p{int(q * 100):02d}"] = pred[:, i, j]
+    return out
+
+
 def train_position(df: pd.DataFrame, position: str, feature_cols: list[str],
                    models_dir: Path = MODELS_DIR) -> dict:
+    """Train the multi-quantile MLP for one position.
+
+    Mirrors the GBM engine's calibration contract: the most-recent-season
+    holdout doubles as the conformal split (offsets land in the manifest under
+    "calibration"), and settings.refit_on_all retrains on every row while
+    keeping those offsets — same exchangeability tradeoff, same rationale.
+    Unlike the GBM, ALL features are median-filled: an MLP can't route NaN."""
     torch = _require_torch()
     cfg = settings.neural
     device = cfg.device if torch.cuda.is_available() else "cpu"
     stats = POSITION_STATS[position]
 
     fill_values = df[feature_cols].median(numeric_only=True)
-    X = df[feature_cols].fillna(fill_values).astype(float).values
-    Y = df[stats].astype(float).values
-    mu, sigma = X.mean(0), X.std(0) + 1e-8
-    Xn = (X - mu) / sigma
+    df = df.copy()
+    df[feature_cols] = df[feature_cols].fillna(fill_values)
 
-    net = _build_net(torch, len(feature_cols), len(stats) * len(QUANTILES)).to(device)
-    opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr)
-    qs = torch.tensor(QUANTILES, dtype=torch.float32, device=device)
+    last_season = int(df["season"].max())
+    train_mask = df["season"] < last_season
+    if train_mask.sum() < 500:  # tiny datasets: fall back to random split
+        rng = np.random.default_rng(0)
+        train_mask = pd.Series(rng.random(len(df)) < 0.85, index=df.index)
 
-    ds = torch.utils.data.TensorDataset(
-        torch.tensor(Xn, dtype=torch.float32), torch.tensor(Y, dtype=torch.float32))
-    loader = torch.utils.data.DataLoader(ds, batch_size=cfg.batch_size, shuffle=True)
-
-    net.train()
-    for epoch in range(cfg.epochs):
+    def _fit(rows: pd.DataFrame):
+        X = rows[feature_cols].astype(float).values
+        Y = rows[stats].astype(float).values
+        mu, sigma = X.mean(0), X.std(0) + 1e-8
+        net = _build_net(torch, len(feature_cols), len(stats) * len(QUANTILES)).to(device)
+        opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr)
+        qs = torch.tensor(QUANTILES, dtype=torch.float32, device=device)
+        ds = torch.utils.data.TensorDataset(
+            torch.tensor((X - mu) / sigma, dtype=torch.float32),
+            torch.tensor(Y, dtype=torch.float32))
+        loader = torch.utils.data.DataLoader(ds, batch_size=cfg.batch_size, shuffle=True)
+        net.train()
         total = 0.0
-        for xb, yb in loader:
-            xb, yb = xb.to(device), yb.to(device)
-            pred = net(xb).view(-1, len(stats), len(QUANTILES))
-            err = yb.unsqueeze(-1) - pred          # (B, stats, Q)
-            loss = torch.maximum(qs * err, (qs - 1) * err).mean()
-            opt.zero_grad(); loss.backward(); opt.step()
-            total += float(loss) * len(xb)
-        if epoch % 10 == 0:
-            log.info("%s epoch %d pinball=%.4f", position, epoch, total / len(ds))
+        for epoch in range(cfg.epochs):
+            total = 0.0
+            for xb, yb in loader:
+                xb, yb = xb.to(device), yb.to(device)
+                pred = net(xb).view(-1, len(stats), len(QUANTILES))
+                err = yb.unsqueeze(-1) - pred          # (B, stats, Q)
+                loss = torch.maximum(qs * err, (qs - 1) * err).mean()
+                opt.zero_grad(); loss.backward(); opt.step()
+                total += float(loss) * len(xb)
+            if epoch % 10 == 0:
+                log.info("%s epoch %d pinball=%.4f", position, epoch, total / len(ds))
+        return net.to("cpu"), mu, sigma, total / len(ds)
+
+    net, mu, sigma, final = _fit(df[train_mask])
+
+    holdout = df[~train_mask]
+    calibration = None
+    if settings.calibrate and not holdout.empty:
+        Xh = holdout[feature_cols].astype(float).values
+        hold_pred = _predict_quantiles(torch, net, (Xh - mu) / sigma, stats)
+        hold_pred.index = holdout.index
+        calibration = conformal_offsets(holdout[stats].astype(float), hold_pred, stats)
+
+    if settings.refit_on_all:  # see quantile_gbm.train_position for the tradeoff
+        net, mu, sigma, final = _fit(df)
 
     model_path, manifest_path = _paths(models_dir, position)
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -93,10 +137,11 @@ def train_position(df: pd.DataFrame, position: str, feature_cols: list[str],
     manifest_path.write_text(json.dumps({
         "position": position, "features": feature_cols, "stats": stats,
         "quantiles": QUANTILES, "norm_mu": mu.tolist(), "norm_sigma": sigma.tolist(),
+        "calibration": calibration,
         "fill_values": {k: (None if pd.isna(v) else float(v))
                         for k, v in fill_values.items()},
     }, indent=2))
-    return {"final_pinball": round(total / len(ds), 4)}
+    return {"final_pinball": round(final, 4)}
 
 
 def predict_position(df: pd.DataFrame, position: str,
@@ -116,12 +161,17 @@ def predict_position(df: pd.DataFrame, position: str,
         X = X.fillna({k: v for k, v in fills.items() if v is not None})
     X = X.values
     Xn = (X - np.array(manifest["norm_mu"])) / np.array(manifest["norm_sigma"])
-    with torch.no_grad():
-        pred = net(torch.tensor(Xn, dtype=torch.float32)).view(-1, len(stats), len(quantiles)).numpy()
-    pred = np.clip(np.sort(pred, axis=-1), 0, None)  # non-crossing, non-negative
+    pred = _predict_quantiles(torch, net, Xn, stats)  # clipped, non-crossing
 
     out = df.copy()
-    for i, stat in enumerate(stats):
-        for j, q in enumerate(quantiles):
-            out[f"{stat}_p{int(q * 100):02d}"] = np.round(pred[:, i, j], 2)
+    for col in pred.columns:
+        out[col] = pred[col].values
+
+    calibration = manifest.get("calibration")
+    if calibration:
+        out = apply_offsets(out, calibration, stats)
+    for stat in stats:
+        for q in quantiles:
+            col = f"{stat}_p{int(q * 100):02d}"
+            out[col] = np.round(out[col].astype(float), 2)
     return out

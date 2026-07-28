@@ -65,6 +65,13 @@ class Settings:
     seasons: list[int] = field(default_factory=lambda: list(range(2016, 2026)))
     gbm: GBMParams = field(default_factory=GBMParams)
     neural: NeuralParams = field(default_factory=NeuralParams)
+    # Conformal (CQR) interval calibration — see gameday/models/calibrate.py.
+    # `calibrate` computes split-conformal offsets on the engines' internal
+    # holdout season; `refit_on_all` then refits on every row while keeping
+    # those offsets (more data for the point forecasts, slightly conservative
+    # offsets — see the note in the engines' train_position).
+    calibrate: bool = True
+    refit_on_all: bool = True
 
 
 settings = Settings()
