@@ -31,7 +31,9 @@ import pandas as pd
 
 from gameday.config import ARTIFACTS_DIR, POSITION_STATS, POSITIONS, QUANTILES
 from gameday.data import rosters
+from gameday.features import opportunity
 from gameday.features.build import build_features, feature_columns
+from gameday.models import usage_forecast
 from gameday.pipeline import load_data
 from gameday.sim.calibrate import build_profiles
 from gameday.sim.run import simulate_matchup
@@ -63,7 +65,7 @@ def run_backtest(
     `variants` names the model configurations to score side by side. Each is
     dict(name, engine, feature_set[, include_adjustments]); the first is the
     *primary* whose rows feed the dashboard. Defaults to the current feature
-    schema vs the previous one — [v2, v1] — so the scorecard always shows the
+    schema vs the previous one — [v3, v2] — so the scorecard always shows the
     new-vs-old lift per segment. (`compare` is retained for callers of the old
     adjusted/no-adjustments A/B; the default variants supersede it.)
     """
@@ -78,7 +80,11 @@ def run_backtest(
     weeks = sorted(test_games["week"].unique().tolist())
     log.info("backtest: season %d, weeks %s, %d games", test_season, weeks, len(test_games))
 
-    feats = build_features(player_weeks, games, rosters=roster_df)
+    usage_feeds = None if source == "demo" else opportunity.fetch_usage_feeds(
+        sorted(int(s) for s in pd.to_numeric(player_weeks["season"], errors="coerce")
+               .dropna().unique()))
+    feats = build_features(player_weeks, games, rosters=roster_df,
+                           usage_feeds=usage_feeds)
 
     players_reports, scorecard, primary = _backtest_players(
         feats, test_season, weeks, engine, persist_replay=persist_replay,
@@ -115,8 +121,8 @@ def _model_engine(engine: str):
 
 def _default_variants(engine: str) -> list[dict]:
     """New feature schema vs old, on the requested engine. First = primary."""
-    return [dict(name="v2", engine=engine, feature_set="v2"),
-            dict(name="v1", engine=engine, feature_set="v1")]
+    return [dict(name="v3", engine=engine, feature_set="v3"),
+            dict(name="v2", engine=engine, feature_set="v2")]
 
 
 def _backtest_players(feats: pd.DataFrame, test_season: int, weeks: list[int],
@@ -169,17 +175,25 @@ def _predict_positions(m, feats: pd.DataFrame, test_season: int, weeks: list[int
     models_dir = models_dir or (BACKTEST_DIR / "models")
     report: dict[str, dict] = {}
     preds = []
+    use_usage = feature_set not in ("v1", "v2") and "snap_pct_ewm2" in feats.columns
     for position in POSITIONS:
         pos = feats[(feats["position"] == position) & feats["fantasy_points"].notna()]
         pos = pos[pos["games_played"] >= 2]
-        cols = feature_columns(position, pos, include_adjustments=include_adjustments,
-                               feature_set=feature_set)
 
         train = pos[pos["season"] < test_season].copy()
         test = pos[(pos["season"] == test_season) & pos["week"].isin(weeks)].copy()
         if train.empty or test.empty:
             log.warning("%s: no train or test rows; skipping", position)
             continue
+
+        if use_usage:
+            # Fold-correct usage stage: priors fit + usage models trained on
+            # the fold's train rows only; train rows get OUT-OF-FOLD usage
+            # forecasts, test rows the final model's.
+            train = usage_forecast.train_usage(train, position, models_dir=models_dir)
+            test = usage_forecast.predict_usage(test, position, models_dir=models_dir)
+        cols = feature_columns(position, train, include_adjustments=include_adjustments,
+                               feature_set=feature_set)
 
         log.info("training %s on %d rows (< %d), scoring %d test rows [%s]",
                  position, len(train), test_season, len(test), feature_set)
@@ -289,6 +303,19 @@ def _segments(df: pd.DataFrame):
         yield "tier", "tier2", df[(rank > cut) & (rank <= 2 * cut)]
         yield "tier", "tier3 (rest)", df[rank > 2 * cut]
         yield "tier", "no prior season", df[rank.isna()]
+    snap = pd.to_numeric(df.get("pred_snap_pct_p50"), errors="coerce") \
+        if "pred_snap_pct_p50" in df else None
+    if snap is not None and snap.notna().any():
+        lo, hi = snap.quantile([1 / 3, 2 / 3])
+        yield "usage", "low usage (pred)", df[snap <= lo]
+        yield "usage", "mid usage (pred)", df[(snap > lo) & (snap <= hi)]
+        yield "usage", "high usage (pred)", df[snap > hi]
+    if "is_depth_promotion" in df:
+        promo = pd.to_numeric(df["is_depth_promotion"], errors="coerce").fillna(0)
+        yield "role", "depth promotion", df[promo == 1]
+    if "weeks_since_return" in df:
+        ret = pd.to_numeric(df["weeks_since_return"], errors="coerce")
+        yield "role", "returning (1st game back)", df[ret == 1]
 
 
 def _scorecard_for(df: pd.DataFrame) -> dict:
@@ -323,7 +350,14 @@ def _scenario_scorecard(frames: dict[str, pd.DataFrame], primary: str) -> dict:
 def _replay_columns(df: pd.DataFrame) -> pd.DataFrame:
     ident = ["player_id", "player_display_name", "position", "team", "opponent_team",
              "is_home", "season", "week", "game_id", "engine", "variant",
-             "years_exp", "age", "is_rookie", "is_new_team", "pos_rank_prev"]
+             "years_exp", "age", "is_rookie", "is_new_team", "pos_rank_prev",
+             "depth_rank", "is_depth_promotion", "weeks_since_return",
+             # usage actuals + EWM naive + forecast p50, so the usage-gate
+             # (forecaster vs naive) is scorable straight from the artifact
+             "snap_pct", "carry_share", "target_share_team",
+             "snap_pct_ewm5", "carry_share_ewm5", "target_share_team_ewm5",
+             "pred_snap_pct_p50", "pred_carry_share_p50",
+             "pred_target_share_team_p50"]
     all_stats = sorted({s for v in POSITION_STATS.values() for s in v})
     stat_cols = [f"{stat}{suf}" for stat in all_stats
                  for suf in ("", "_p10", "_p25", "_p50", "_p75", "_p90", "_r8")]
@@ -517,7 +551,7 @@ def format_scorecard(report: dict) -> str:
         return out
 
     lines.append(row("OVERALL", adj.get("overall"), base.get("overall") if base else None))
-    for group in ("phase", "experience", "team", "tier"):
+    for group in ("phase", "experience", "team", "tier", "usage", "role"):
         if group not in adj.get("segments", {}):
             continue
         lines.append(f"— {group} —")

@@ -87,14 +87,14 @@ def replay(
     weeks: str = typer.Option("", help="weeks to replay, e.g. 1-8 or 1,3,5 (default: all)"),
     engine: str = typer.Option("gbm", help="gbm | neural"),
     sims: int = typer.Option(0, help="game-sim replicates per historical game (0 = skip sims, faster)"),
-    compare: bool = typer.Option(True, help="also score the previous feature schema (v1) so the scorecard shows the new-vs-old lift"),
+    compare: bool = typer.Option(True, help="also score the previous feature schema (v2) so the scorecard shows the new-vs-old lift"),
 ):
     """Historical replay + model-variant validation.
 
     Replays past seasons out-of-sample and writes per-player forecast-vs-actual
     rows and a scenario scorecard to artifacts/replay/{season} for the dashboard
-    Replay view. By default the current feature schema (v2) is scored against
-    the previous one (v1); --no-compare scores v2 alone (faster). With
+    Replay view. By default the current feature schema (v3) is scored against
+    the previous one (v2); --no-compare scores v3 alone (faster). With
     --test-seasons the replay loops several seasons and prints an n-weighted
     combined report at the end; each season's artifacts persist as usual.
     """
@@ -102,7 +102,7 @@ def replay(
 
     hist = [int(s) for s in seasons.split(",") if s] or None
     targets = [int(s) for s in test_seasons.split(",") if s] or [season or None]
-    variants = None if compare else [dict(name="v2", engine=engine, feature_set="v2")]
+    variants = None if compare else [dict(name="v3", engine=engine, feature_set="v3")]
 
     reports = []
     for ts in targets:

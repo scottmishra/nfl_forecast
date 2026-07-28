@@ -28,13 +28,15 @@ import pandas as pd
 from gameday.config import POSITION_STATS, FORM_WINDOWS
 from gameday.data.teams import TEAMS, travel_km
 from gameday.data import social
+from gameday.features import opportunity
 from gameday.features.temporal import add_temporal, temporal_feature_names
 
 log = logging.getLogger(__name__)
 
 # Contract with downstream consumers (bundling/refresh): bumped whenever the
-# emitted feature schema changes shape. v2 = temporal + usage-share families.
-FEATURE_SCHEMA_VERSION = 2
+# emitted feature schema changes shape. v2 = temporal + usage-share families;
+# v3 = snap/share usage series, availability, role priors, usage forecasts.
+FEATURE_SCHEMA_VERSION = 3
 
 USAGE_COLS = ["attempts", "carries", "targets"]
 
@@ -43,9 +45,15 @@ USAGE_COLS = ["attempts", "carries", "targets"]
 SHARE_COLS = ["target_share", "air_yards_share", "wopr", "racr"]
 
 # Feature families the engines should hand to LightGBM as raw NaN rather than
-# median-fill: a missing lag/EWM means "no history yet" and a missing prior-
-# season rank means "wasn't in the league" — both are signal.
-NATIVE_NAN_PATTERN = re.compile(r"_(?:ewm\d+|lag\d+|slope|vol\d+)$|^pos_rank_prev$")
+# median-fill: a missing lag/EWM means "no history yet", a missing prior-
+# season rank means "wasn't in the league", and a missing depth/usage value
+# means "not charted / no snap data" — all signal.
+NATIVE_NAN_PATTERN = re.compile(
+    r"_(?:ewm\d+|lag\d+|slope|vol\d+)$"
+    r"|^pos_rank_prev$|^depth_rank(?:_change)?$"
+    r"|^(?:games_missed_last8|weeks_since_return|missed_recent)$"
+    r"|^pred_.*_(?:p\d{2}|spread)$"
+    r"|_(?:prior|est)$")
 
 
 def _recent_roster(player_weeks: pd.DataFrame, team: str) -> list[tuple]:
@@ -130,8 +138,13 @@ def build_features(
     games: pd.DataFrame,
     buzz_provider: str = "neutral",
     rosters: pd.DataFrame | None = None,
+    usage_feeds: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
-    """Return the full feature matrix (historical rows + upcoming-slate rows)."""
+    """Return the full feature matrix (historical rows + upcoming-slate rows).
+
+    `usage_feeds` (from opportunity.fetch_usage_feeds) enables the v3 usage/
+    availability stage; without it (demo, offline) the frame is v2-shaped and
+    every v3 consumer degrades gracefully via column presence."""
     all_stats = sorted({s for stats in POSITION_STATS.values() for s in stats})
 
     scaffold = _upcoming_scaffold(player_weeks, games, current_rosters=rosters)
@@ -164,6 +177,23 @@ def build_features(
     totals["season"] = totals["season"] + 1
     df = df.merge(totals[["season", "position", "player_id", "pos_rank_prev"]],
                   on=["season", "position", "player_id"], how="left")
+
+    # --- usage / availability (v3, optional feeds) ------------------------
+    # Usage shares get the same temporal treatment as stats; availability
+    # (depth chart, injury report) joins on the CURRENT week — published
+    # before kickoff, so pre-kickoff-legal by construction. has_usage keys
+    # off the shifted EWM so training and slate rows share one definition.
+    df["has_usage"] = 0
+    if usage_feeds is not None:
+        shares = opportunity.compute_usage_shares(
+            player_weeks, usage_feeds["snaps"], usage_feeds.get("team_weeks"))
+        df = df.merge(shares, on=["player_id", "season", "week"], how="left")
+        df = add_temporal(df, opportunity.USAGE_SERIES)
+        df = opportunity.add_availability(
+            df, usage_feeds.get("injuries"), usage_feeds.get("depth"))
+        df = opportunity.add_absence_history(df, games)
+        df = opportunity.add_team_stint(df)
+        df["has_usage"] = df["snap_pct_ewm2"].notna().astype(int)
 
     # --- team / opponent context ----------------------------------------
     grid = _team_week_grid(games).sort_values(["team", "season", "week"])
@@ -279,7 +309,7 @@ def _add_roster_features(df: pd.DataFrame, rosters: pd.DataFrame | None) -> pd.D
 
 def feature_columns(position: str, df: pd.DataFrame,
                     include_adjustments: bool = True,
-                    feature_set: str = "v2") -> list[str]:
+                    feature_set: str = "v3") -> list[str]:
     """Model inputs for a position: its stat-form columns + shared context.
 
     `include_adjustments` toggles the season-to-season roster features so the
@@ -291,7 +321,12 @@ def feature_columns(position: str, df: pd.DataFrame,
              position's stats and usage, the usage-share families for
              pass-catching positions (RB/WR/TE — a QB's own target share
              carries no signal), and the prior-season positional finish
-             rank (pos_rank_prev)."""
+             rank (pos_rank_prev)
+      "v3" — v2 plus the usage/opportunity layer: temporal snap/share
+             series, current-week availability, role priors + shrinkage
+             estimates, and the usage forecaster's pred_* quantiles.
+             Same-week usage ACTUALS (snap_pct, carry_share, ...) are never
+             model inputs — only their shifted forms and forecasts."""
     stats = POSITION_STATS[position]
     cols: list[str] = []
     for stat in stats + USAGE_COLS:
@@ -312,4 +347,15 @@ def feature_columns(position: str, df: pd.DataFrame,
             temporal_base = temporal_base + SHARE_COLS
         cols += temporal_feature_names(temporal_base)
         cols.append("pos_rank_prev")
+    if feature_set not in ("v1", "v2"):
+        from gameday.models.usage_forecast import USAGE_TARGETS
+
+        cols += temporal_feature_names(opportunity.USAGE_SERIES)
+        cols += opportunity.AVAILABILITY_COLS
+        cols += ["missed_recent", "n_with_team", "has_usage", "usage_w"]
+        cols += [f"{t}_prior" for t in opportunity.USAGE_SERIES]
+        cols += [f"{t}_est" for t in opportunity.USAGE_SERIES]
+        for t in USAGE_TARGETS[position]:
+            cols += [f"pred_{t}_p{int(q * 100):02d}" for q in (0.25, 0.50, 0.75)]
+            cols.append(f"pred_{t}_spread")
     return [c for c in dict.fromkeys(cols) if c in df.columns]

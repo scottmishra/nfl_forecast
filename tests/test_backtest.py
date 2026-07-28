@@ -15,7 +15,7 @@ def report():
 def test_qb_features_pruned(report):
     """The prune pass caps QB/TE at top-K gain features and records the list."""
     manifest = json.loads(
-        (bt.BACKTEST_DIR / "models" / "v2" / "manifest_QB.json").read_text())
+        (bt.BACKTEST_DIR / "models" / "v3" / "manifest_QB.json").read_text())
     top_k = settings.gbm.top_k_features["QB"]
     assert len(manifest["features"]) <= top_k
 

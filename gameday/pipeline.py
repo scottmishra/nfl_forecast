@@ -33,7 +33,9 @@ from gameday.config import (FEATURES_DIR, FORECASTS_DIR, MODELS_DIR, POSITIONS,
 from gameday.data import demo as demo_data
 from gameday.data import nflverse, rosters, weather
 from gameday.data.teams import TEAMS
+from gameday.features import opportunity
 from gameday.features.build import build_features, feature_columns
+from gameday.models import usage_forecast
 
 log = logging.getLogger(__name__)
 
@@ -80,8 +82,14 @@ def prepare(source: str = "nflverse", seasons: list[int] | None = None,
     if live_weather:
         games = _refresh_upcoming_weather(games)
 
+    # Usage feeds enable the v3 opportunity layer; a failed fetch degrades
+    # to v2-shaped features rather than blocking the run.
+    usage_feeds = None if source == "demo" else opportunity.fetch_usage_feeds(
+        seasons or settings.seasons)
+
     log.info("building features (%d player-weeks)", len(player_weeks))
-    feats = build_features(player_weeks, games, buzz_provider=buzz_provider, rosters=roster_df)
+    feats = build_features(player_weeks, games, buzz_provider=buzz_provider,
+                           rosters=roster_df, usage_feeds=usage_feeds)
     feats.to_parquet(FEATURES_DIR / "features.parquet", index=False)
     return PipelineData(feats=feats, games=games, player_weeks=player_weeks,
                         source=source, seasons=seasons)
@@ -89,17 +97,24 @@ def prepare(source: str = "nflverse", seasons: list[int] | None = None,
 
 def train_models(feats: pd.DataFrame, engine: str = "gbm",
                  models_dir: Path = MODELS_DIR) -> dict:
-    """Fit one engine per position on all historical rows. Returns reports."""
+    """Fit one engine per position on all historical rows. Returns reports.
+
+    When the v3 usage layer is present, the usage forecaster trains first
+    (role priors + OOF usage predictions for the training rows) so the stat
+    engine never sees a same-week usage actual or an in-fold forecast."""
     m = model_engine(engine)
+    use_usage = "snap_pct_ewm2" in feats.columns
     reports: dict[str, dict] = {}
     for position in POSITIONS:
         pos_df = feats[feats["position"] == position]
-        cols = feature_columns(position, pos_df)
         hist = pos_df[pos_df["fantasy_points"].notna()].copy()
         hist = hist[hist["games_played"] >= 2]  # need some form signal
         if hist.empty:
             log.warning("no historical rows for %s; skipping", position)
             continue
+        if use_usage:
+            hist = usage_forecast.train_usage(hist, position, models_dir=models_dir)
+        cols = feature_columns(position, hist)
         log.info("training %s on %d rows / %d features", position, len(hist), len(cols))
         reports[position] = m.train_position(hist, position, cols, models_dir=models_dir)
         log.info("%s validation: %s", position, reports[position])
@@ -108,7 +123,10 @@ def train_models(feats: pd.DataFrame, engine: str = "gbm",
 
 def predict_slate(feats: pd.DataFrame, engine: str = "gbm",
                   models_dir: Path = MODELS_DIR) -> pd.DataFrame:
-    """Predict every upcoming-slate row using already-trained models."""
+    """Predict every upcoming-slate row using already-trained models.
+
+    predict_usage is a no-op when no usage manifest was trained, so the demo
+    and any v2-era model set behave exactly as before."""
     m = model_engine(engine)
     forecasts = []
     for position in POSITIONS:
@@ -116,6 +134,7 @@ def predict_slate(feats: pd.DataFrame, engine: str = "gbm",
         future = pos_df[pos_df["fantasy_points"].isna()].copy()
         if future.empty:
             continue
+        future = usage_forecast.predict_usage(future, position, models_dir=models_dir)
         forecasts.append(m.predict_position(future, position, models_dir=models_dir))
     if not forecasts:
         return pd.DataFrame()
