@@ -36,8 +36,8 @@ def _require_torch():
         ) from exc
 
 
-def _paths(position: str) -> tuple[Path, Path]:
-    return MODELS_DIR / f"mlp_{position}.pt", MODELS_DIR / f"mlp_manifest_{position}.json"
+def _paths(models_dir: Path, position: str) -> tuple[Path, Path]:
+    return models_dir / f"mlp_{position}.pt", models_dir / f"mlp_manifest_{position}.json"
 
 
 def _build_net(torch, n_features: int, n_outputs: int):
@@ -53,13 +53,15 @@ def _build_net(torch, n_features: int, n_outputs: int):
     return nn.Sequential(*layers)
 
 
-def train_position(df: pd.DataFrame, position: str, feature_cols: list[str]) -> dict:
+def train_position(df: pd.DataFrame, position: str, feature_cols: list[str],
+                   models_dir: Path = MODELS_DIR) -> dict:
     torch = _require_torch()
     cfg = settings.neural
     device = cfg.device if torch.cuda.is_available() else "cpu"
     stats = POSITION_STATS[position]
 
-    X = df[feature_cols].astype(float).values
+    fill_values = df[feature_cols].median(numeric_only=True)
+    X = df[feature_cols].fillna(fill_values).astype(float).values
     Y = df[stats].astype(float).values
     mu, sigma = X.mean(0), X.std(0) + 1e-8
     Xn = (X - mu) / sigma
@@ -85,19 +87,22 @@ def train_position(df: pd.DataFrame, position: str, feature_cols: list[str]) -> 
         if epoch % 10 == 0:
             log.info("%s epoch %d pinball=%.4f", position, epoch, total / len(ds))
 
-    model_path, manifest_path = _paths(position)
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    model_path, manifest_path = _paths(models_dir, position)
+    models_dir.mkdir(parents=True, exist_ok=True)
     torch.save(net.state_dict(), model_path)
     manifest_path.write_text(json.dumps({
         "position": position, "features": feature_cols, "stats": stats,
         "quantiles": QUANTILES, "norm_mu": mu.tolist(), "norm_sigma": sigma.tolist(),
+        "fill_values": {k: (None if pd.isna(v) else float(v))
+                        for k, v in fill_values.items()},
     }, indent=2))
     return {"final_pinball": round(total / len(ds), 4)}
 
 
-def predict_position(df: pd.DataFrame, position: str) -> pd.DataFrame:
+def predict_position(df: pd.DataFrame, position: str,
+                     models_dir: Path = MODELS_DIR) -> pd.DataFrame:
     torch = _require_torch()
-    model_path, manifest_path = _paths(position)
+    model_path, manifest_path = _paths(models_dir, position)
     manifest = json.loads(manifest_path.read_text())
     stats, quantiles = manifest["stats"], manifest["quantiles"]
 
@@ -105,7 +110,11 @@ def predict_position(df: pd.DataFrame, position: str) -> pd.DataFrame:
     net.load_state_dict(torch.load(model_path, map_location="cpu"))
     net.eval()
 
-    X = df[manifest["features"]].astype(float).values
+    X = df[manifest["features"]].astype(float)
+    fills = manifest.get("fill_values")
+    if fills:
+        X = X.fillna({k: v for k, v in fills.items() if v is not None})
+    X = X.values
     Xn = (X - np.array(manifest["norm_mu"])) / np.array(manifest["norm_sigma"])
     with torch.no_grad():
         pred = net(torch.tensor(Xn, dtype=torch.float32)).view(-1, len(stats), len(quantiles)).numpy()

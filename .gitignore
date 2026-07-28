@@ -12,13 +12,13 @@ venv/
 /data/
 *.duckdb
 
-# artifacts are regenerable — except the three small demo serving files the
-# dashboard reads, committed so a fresh clone works without running the pipeline
+# artifacts are regenerable — except the small demo fixtures the dashboard
+# falls back to on a fresh clone (live latest_* artifacts are machine-local,
+# so a deployed clone's worktree never goes dirty from a pipeline run)
 artifacts/*
 !artifacts/forecasts
 artifacts/forecasts/*
-!artifacts/forecasts/latest_forecasts.parquet
-!artifacts/forecasts/latest_slate.parquet
-!artifacts/forecasts/latest_sims.json
+!artifacts/forecasts/demo
+!artifacts/forecasts/demo/**
 .env
 .DS_Store

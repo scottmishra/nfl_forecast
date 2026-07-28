@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import math
-from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +27,7 @@ app = FastAPI(title="Gameday Forecaster", version="0.1.0")
 
 WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
 REPLAY_DIR = ARTIFACTS_DIR / "replay"
+DEMO_DIR = FORECASTS_DIR / "demo"  # committed fixtures: a fresh clone serves these
 
 
 def _clean(obj):
@@ -43,16 +43,43 @@ def _clean(obj):
     return obj
 
 
-@lru_cache(maxsize=1)
-def _load():
+# --------------------------------------------------------------------------
+# artifact loading — cached per file-mtime so a nightly refresh (which swaps
+# artifacts atomically via os.replace) is picked up on the next request with
+# no server restart. stat() per request costs microseconds.
+# --------------------------------------------------------------------------
+
+_mtime_cache: dict[str, tuple[tuple, object]] = {}
+
+
+def _mtime_cached(key: str, paths: list[Path], loader):
+    stamp = tuple(p.stat().st_mtime_ns if p.exists() else None for p in paths)
+    hit = _mtime_cache.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    value = loader()
+    _mtime_cache[key] = (stamp, value)
+    return value
+
+
+def _forecast_paths() -> tuple[Path, Path]:
+    """Live artifacts when present, else the committed demo fixtures."""
     fpath = FORECASTS_DIR / "latest_forecasts.parquet"
     spath = FORECASTS_DIR / "latest_slate.parquet"
+    if fpath.exists() and spath.exists():
+        return fpath, spath
+    return DEMO_DIR / "latest_forecasts.parquet", DEMO_DIR / "latest_slate.parquet"
+
+
+def _load():
+    fpath, spath = _forecast_paths()
     if not fpath.exists() or not spath.exists():
         raise HTTPException(
             status_code=503,
             detail="No forecasts yet — run `gameday demo` or `gameday forecast` first.",
         )
-    return pd.read_parquet(fpath), pd.read_parquet(spath)
+    return _mtime_cached("forecasts", [fpath, spath],
+                         lambda: (pd.read_parquet(fpath), pd.read_parquet(spath)))
 
 
 def _team_meta(abbr: str) -> dict:
@@ -127,14 +154,12 @@ def game_detail(game_id: str):
     })
 
 
-@lru_cache(maxsize=1)
 def _load_sims() -> dict:
     path = FORECASTS_DIR / "latest_sims.json"
     if not path.exists():
-        return {}
-    import json
-
-    return json.loads(path.read_text())
+        path = DEMO_DIR / "latest_sims.json"
+    return _mtime_cached("sims", [path],
+                         lambda: json.loads(path.read_text()) if path.exists() else {})
 
 
 @app.get("/api/game/{game_id}/sim")
@@ -167,7 +192,6 @@ def health():
 # historical replay — forecast-vs-actual for a past season (artifacts/replay)
 # --------------------------------------------------------------------------
 
-@lru_cache(maxsize=8)
 def _load_replay(season: int) -> pd.DataFrame:
     path = REPLAY_DIR / str(season) / "players.parquet"
     if not path.exists():
@@ -175,7 +199,7 @@ def _load_replay(season: int) -> pd.DataFrame:
             status_code=503,
             detail=f"No replay for {season} yet — run `gameday replay --season {season}`.",
         )
-    return pd.read_parquet(path)
+    return _mtime_cached(f"replay:{season}", [path], lambda: pd.read_parquet(path))
 
 
 def _replay_player_payload(row: pd.Series) -> dict:

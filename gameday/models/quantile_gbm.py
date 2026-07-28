@@ -3,7 +3,9 @@
 One booster per (position, stat, quantile). Boosters are small (~hundreds of
 KB) and train in seconds on CPU; the full slate of models trains in a couple
 of minutes on a laptop, no GPU required. Artifacts are plain LightGBM text
-models plus a JSON manifest recording the feature list used at train time.
+models plus a JSON manifest recording the feature list AND the train-time
+median fill values, so a machine that only ships the artifacts (e.g. the Pi)
+predicts with exactly the information the trainer saw.
 """
 
 from __future__ import annotations
@@ -21,23 +23,30 @@ from gameday.config import MODELS_DIR, POSITION_STATS, QUANTILES, settings
 log = logging.getLogger(__name__)
 
 
-def _model_path(position: str, stat: str, q: float) -> Path:
-    return MODELS_DIR / f"gbm_{position}_{stat}_q{int(q * 100):02d}.txt"
+def _model_path(models_dir: Path, position: str, stat: str, q: float) -> Path:
+    return models_dir / f"gbm_{position}_{stat}_q{int(q * 100):02d}.txt"
 
 
-def _manifest_path(position: str) -> Path:
-    return MODELS_DIR / f"manifest_{position}.json"
+def _manifest_path(models_dir: Path, position: str) -> Path:
+    return models_dir / f"manifest_{position}.json"
 
 
-def train_position(df: pd.DataFrame, position: str, feature_cols: list[str]) -> dict:
+def train_position(df: pd.DataFrame, position: str, feature_cols: list[str],
+                   models_dir: Path = MODELS_DIR) -> dict:
     """Train quantile boosters for every stat of one position.
 
     `df` must contain only historical (non-NaN target) rows for `position`.
+    NaN features are filled with the training medians, which are persisted in
+    the manifest as `fill_values` for identical treatment at predict time.
     Returns per-stat validation pinball loss on the most recent season.
     """
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    models_dir.mkdir(parents=True, exist_ok=True)
     params = settings.gbm
     report: dict[str, float] = {}
+
+    fill_values = df[feature_cols].median(numeric_only=True)
+    df = df.copy()
+    df[feature_cols] = df[feature_cols].fillna(fill_values)
 
     last_season = int(df["season"].max())
     train_mask = df["season"] < last_season
@@ -61,27 +70,36 @@ def train_position(df: pd.DataFrame, position: str, feature_cols: list[str]) -> 
             pred = model.predict(X[~train_mask])
             err = y[~train_mask].values - pred
             losses.append(float(np.mean(np.maximum(q * err, (q - 1) * err))))
-            model.booster_.save_model(str(_model_path(position, stat, q)))
+            model.booster_.save_model(str(_model_path(models_dir, position, stat, q)))
         report[stat] = round(float(np.mean(losses)), 4)
         log.info("%s/%s pinball=%.3f", position, stat, report[stat])
 
-    _manifest_path(position).write_text(json.dumps(
+    _manifest_path(models_dir, position).write_text(json.dumps(
         {"position": position, "features": feature_cols, "stats": POSITION_STATS[position],
-         "quantiles": QUANTILES, "validation_pinball": report}, indent=2))
+         "quantiles": QUANTILES, "validation_pinball": report,
+         "fill_values": {k: (None if pd.isna(v) else float(v))
+                         for k, v in fill_values.items()}}, indent=2))
     return report
 
 
-def predict_position(df: pd.DataFrame, position: str) -> pd.DataFrame:
-    """Quantile predictions for rows of `position`. Adds `{stat}_p{q}` columns."""
-    manifest = json.loads(_manifest_path(position).read_text())
+def predict_position(df: pd.DataFrame, position: str,
+                     models_dir: Path = MODELS_DIR) -> pd.DataFrame:
+    """Quantile predictions for rows of `position`. Adds `{stat}_p{q}` columns.
+
+    NaN features are filled with the manifest's train-time medians, so
+    inference on a fresh machine matches inference next to the trainer."""
+    manifest = json.loads(_manifest_path(models_dir, position).read_text())
     feature_cols = manifest["features"]
     X = df[feature_cols].astype(float)
+    fill_values = manifest.get("fill_values")
+    if fill_values:
+        X = X.fillna({k: v for k, v in fill_values.items() if v is not None})
 
     out = df.copy()
     for stat in manifest["stats"]:
         preds = {}
         for q in manifest["quantiles"]:
-            booster = lgb.Booster(model_file=str(_model_path(position, stat, q)))
+            booster = lgb.Booster(model_file=str(_model_path(models_dir, position, stat, q)))
             preds[q] = np.clip(booster.predict(X), 0, None)
         # Enforce non-crossing quantiles: sort each row's quantile values.
         stacked = np.sort(np.column_stack([preds[q] for q in manifest["quantiles"]]), axis=1)

@@ -112,34 +112,34 @@ def _backtest_players(feats: pd.DataFrame, test_season: int, weeks: list[int],
     Returns (per-position/stat aggregate report, scenario scorecard). Persists
     per-player replay rows + the scorecard to artifacts/replay when asked."""
     m = _model_engine(engine)
-    # Redirect artifacts so a backtest never clobbers production models;
-    # restored afterward so later pipeline runs in-process are unaffected.
-    orig_models_dir = m.MODELS_DIR
-    m.MODELS_DIR = BACKTEST_DIR / "models"
-    m.MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        report, adj_preds = _predict_positions(
-            m, feats, test_season, weeks, include_adjustments=True)
-        base_preds = None
-        if compare:
-            log.info("scoring baseline (no season-to-season adjustments) for comparison")
-            _, base_preds = _predict_positions(
-                m, feats, test_season, weeks, include_adjustments=False)
-        scorecard = _scenario_scorecard(adj_preds, base_preds)
-        if persist_replay and not adj_preds.empty:
-            _persist_replay(test_season, adj_preds, scorecard)
-        return report, scorecard
-    finally:
-        m.MODELS_DIR = orig_models_dir
+    # Backtest models land in their own directory so they never clobber
+    # production models.
+    models_dir = BACKTEST_DIR / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    report, adj_preds = _predict_positions(
+        m, feats, test_season, weeks, include_adjustments=True, models_dir=models_dir)
+    base_preds = None
+    if compare:
+        log.info("scoring baseline (no season-to-season adjustments) for comparison")
+        _, base_preds = _predict_positions(
+            m, feats, test_season, weeks, include_adjustments=False, models_dir=models_dir)
+    scorecard = _scenario_scorecard(adj_preds, base_preds)
+    if persist_replay and not adj_preds.empty:
+        _persist_replay(test_season, adj_preds, scorecard)
+    return report, scorecard
 
 
 def _predict_positions(m, feats: pd.DataFrame, test_season: int, weeks: list[int],
-                       include_adjustments: bool):
+                       include_adjustments: bool, models_dir=None):
     """Train each position on <test_season, predict the test weeks.
 
     Returns (per-position/stat aggregate report, concatenated per-player
     prediction frame with actuals, quantiles, the naive baseline, and the
-    adjustment features all carried through from `predict_position`)."""
+    adjustment features all carried through from `predict_position`).
+
+    NaN handling lives in the engines: train_position stores its train-time
+    medians in the manifest and predict_position applies them."""
+    models_dir = models_dir or (BACKTEST_DIR / "models")
     report: dict[str, dict] = {}
     preds = []
     for position in POSITIONS:
@@ -152,15 +152,12 @@ def _predict_positions(m, feats: pd.DataFrame, test_season: int, weeks: list[int
         if train.empty or test.empty:
             log.warning("%s: no train or test rows; skipping", position)
             continue
-        medians = train[cols].median(numeric_only=True)
-        train[cols] = train[cols].fillna(medians)
-        test[cols] = test[cols].fillna(medians)
 
         log.info("training %s on %d rows (< %d), scoring %d test rows%s",
                  position, len(train), test_season, len(test),
                  "" if include_adjustments else " [baseline]")
-        m.train_position(train, position, cols)
-        pred = m.predict_position(test, position)
+        m.train_position(train, position, cols, models_dir=models_dir)
+        pred = m.predict_position(test, position, models_dir=models_dir)
         report[position] = _position_stats_report(pred, position)
         preds.append(pred)
 
