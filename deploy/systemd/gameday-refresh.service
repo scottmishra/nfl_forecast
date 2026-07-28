@@ -1,0 +1,13 @@
+# Nightly forecast refresh (oneshot) — paired with gameday-refresh.timer.
+# Installed as a systemd *user* unit on the Pi (~/.config/systemd/user/).
+[Unit]
+Description=Gameday nightly forecast refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/nfl_forecast
+ExecStart=%h/nfl_forecast/.venv/bin/gameday refresh --sims 300
+TimeoutStartSec=30min
+Nice=10

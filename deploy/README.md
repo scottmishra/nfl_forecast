@@ -43,3 +43,35 @@ downloads finished model bundles. `models.json` in this directory is the
 Bundle integrity: `manifest.json` inside the tar lists every file with its
 sha256; installs verify each file and refuse path traversal, mismatched
 hashes, wrong `feature_schema_version`, or a missing engine dependency.
+
+## Pi install: nightly refresh timer
+
+The units in `systemd/` are **user** units (same pattern as the fleet's
+`claude-rc.service`) and assume the repo lives at `~/nfl_forecast` with its
+venv at `~/nfl_forecast/.venv`.
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp ~/nfl_forecast/deploy/systemd/gameday-refresh.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now gameday-refresh.timer
+
+# verify
+systemctl --user list-timers gameday-refresh.timer   # next fire time
+systemctl --user start gameday-refresh.service       # run one refresh now
+journalctl --user -u gameday-refresh.service -n 50   # inspect the last run
+cat ~/nfl_forecast/artifacts/forecasts/refresh_status.json
+```
+
+Notes:
+
+- Over SSH the user bus may not be up; prefix commands with
+  `XDG_RUNTIME_DIR=/run/user/1000` (adjust the uid to `id -u`) if
+  `systemctl --user` complains about the bus.
+- User timers only run while the user has a session unless lingering is on:
+  `loginctl show-user $USER | grep Linger` — if `Linger=no`, enable it with
+  `sudo loginctl enable-linger $USER` so the timer fires after reboots
+  without a login.
+- The timer fires at 10:30 UTC (see the comment in the unit: after
+  nflverse's overnight-ET publishing) with up to 10 minutes of jitter;
+  `Persistent=true` catches up missed runs after downtime.

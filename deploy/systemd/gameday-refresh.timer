@@ -1,0 +1,15 @@
+# Fires the nightly refresh. 10:30 UTC is ~05:30 ET (06:30 EDT) — after the
+# nflverse nightly data jobs finish publishing overnight (ET), so the refresh
+# sees fresh stat files instead of revalidating yesterday's. RandomizedDelaySec
+# spreads fleet Pis over 10 minutes so they don't hit GitHub in lockstep;
+# Persistent=true catches up a missed run after a power cut.
+[Unit]
+Description=Run the gameday forecast refresh nightly
+
+[Timer]
+OnCalendar=*-*-* 10:30:00 UTC
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
