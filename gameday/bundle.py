@@ -80,11 +80,15 @@ def pack(models_dir: Path, out_dir: Path, meta: dict | None = None) -> Path:
     models_dir = Path(models_dir)
     now = dt.datetime.now(dt.timezone.utc)
     version = f"models-{now:%Y%m%d-%H%M%S}"
-    model_files = sorted(p for p in models_dir.iterdir()
-                         if p.is_file() and p.name != "manifest.json")
+    # Recursive: the usage forecaster lives in a usage/ subdirectory and must
+    # ship with the stat boosters (a v3 bundle without it fails at predict).
+    model_files = sorted(
+        p for p in models_dir.rglob("*")
+        if p.is_file() and p.relative_to(models_dir).as_posix() != "manifest.json")
     if not model_files:
         raise FileNotFoundError(f"no model files to pack in {models_dir}")
-    files = {f"models/{p.name}": _sha256(p.read_bytes()) for p in model_files}
+    files = {f"models/{p.relative_to(models_dir).as_posix()}": _sha256(p.read_bytes())
+             for p in model_files}
     manifest = {
         "schema": SCHEMA,
         "version": version,
@@ -107,7 +111,7 @@ def pack(models_dir: Path, out_dir: Path, meta: dict | None = None) -> Path:
         info.size, info.mtime = len(payload), int(now.timestamp())
         tar.addfile(info, io.BytesIO(payload))
         for p in model_files:
-            tar.add(p, arcname=f"models/{p.name}")
+            tar.add(p, arcname=f"models/{p.relative_to(models_dir).as_posix()}")
     log.info("packed %d files (%.1f MB) -> %s",
              len(model_files), bundle_path.stat().st_size / 1e6, bundle_path)
     return bundle_path
@@ -159,6 +163,12 @@ def verify_compatible(manifest: dict) -> None:
         raise ValueError(
             f"bundle feature_schema_version={got} != local {local}; "
             "retrain against this code or upgrade the deployment")
+    if isinstance(got, int) and got >= 3 and not any(
+            f.startswith("models/usage/") for f in (manifest.get("files") or {})):
+        raise ValueError(
+            "feature_schema_version>=3 bundle has no models/usage/ forecaster "
+            "files — predict would fail on the pred_*/_est features; repack "
+            "from a models dir that includes usage/")
     if manifest.get("engine") == "neural":
         try:
             import torch  # noqa: F401
@@ -185,7 +195,11 @@ def install(bundle_path: Path, models_root: Path) -> dict:
         with tarfile.open(bundle_path, "r:gz") as tar:
             (incoming / "manifest.json").write_bytes(tar.extractfile("manifest.json").read())
             for relpath in manifest["files"]:
-                (incoming / Path(relpath).name).write_bytes(tar.extractfile(relpath).read())
+                # Strip the leading "models/" but keep any deeper structure
+                # (usage/ forecaster files must land at current/usage/...).
+                dest = incoming.joinpath(*Path(relpath).parts[1:])
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(tar.extractfile(relpath).read())
         _swap(models_root, incoming)
     except BaseException:
         shutil.rmtree(incoming, ignore_errors=True)

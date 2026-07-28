@@ -20,6 +20,9 @@ QB_TXT = "gbm_QB_fantasy_points_q50.txt"
 RB_TXT = "gbm_RB_fantasy_points_q50.txt"
 
 
+USAGE_TXT = "usage/usage_QB_snap_pct_q50.txt"
+
+
 @pytest.fixture
 def models_dir(tmp_path):
     d = tmp_path / "trained"
@@ -29,6 +32,11 @@ def models_dir(tmp_path):
     (d / "manifest_QB.json").write_text(json.dumps({
         "position": "QB", "features": ["a", "b", "c"],
         "stats": ["fantasy_points"], "quantiles": [0.5], "fill_values": {}}))
+    # v3 bundles must ship the usage forecaster subdirectory (nested paths).
+    (d / "usage").mkdir()
+    (d / USAGE_TXT).write_text("tree data usage")
+    (d / "usage" / "manifest_usage_QB.json").write_text(json.dumps({
+        "position": "QB", "targets": ["snap_pct"], "quantiles": [0.5]}))
     return d
 
 
@@ -42,7 +50,8 @@ def test_pack_verify_roundtrip(models_dir, tmp_path):
     assert manifest["engine"] == "gbm" and manifest["train_seasons"] == [2022, 2023]
     assert manifest["positions"]["QB"]["n_features"] == 3
     assert set(manifest["files"]) == {
-        f"models/{QB_TXT}", f"models/{RB_TXT}", "models/manifest_QB.json"}
+        f"models/{QB_TXT}", f"models/{RB_TXT}", "models/manifest_QB.json",
+        f"models/{USAGE_TXT}", "models/usage/manifest_usage_QB.json"}
     assert manifest["feature_schema_version"] == LOCAL_SCHEMA  # stamps the live constant
 
 
@@ -77,6 +86,8 @@ def test_install_swap_and_rollback(models_dir, tmp_path):
     bundle.install(b1, root)
     assert (root / "current" / "manifest.json").exists()
     assert (root / "current" / QB_TXT).read_text() == "tree data QB"
+    # Nested usage/ files must survive install with their structure intact.
+    assert (root / "current" / USAGE_TXT).read_text() == "tree data usage"
 
     (models_dir / QB_TXT).write_text("tree data QB v2")
     b2 = bundle.pack(models_dir, tmp_path / "bundles2")
@@ -110,6 +121,23 @@ def test_incompatible_feature_schema_rejected(models_dir, tmp_path, monkeypatch)
         bundle.install(b1, root)
     assert not (root / "current").exists()
     assert not (root / "incoming").exists()
+
+
+@pytest.mark.skipif(LOCAL_SCHEMA < 3, reason="usage guard applies to v3+ schemas")
+def test_v3_bundle_without_usage_rejected(tmp_path):
+    """Regression: a v3-schema bundle missing models/usage/ (the 2026-07-28
+    non-recursive-pack incident) must be refused at install time, not fail
+    with a KeyError deep in predict on the Pi."""
+    d = tmp_path / "trained"
+    d.mkdir()
+    (d / QB_TXT).write_text("tree data QB")
+    (d / "manifest_QB.json").write_text(json.dumps({
+        "position": "QB", "features": ["a"], "stats": ["fantasy_points"],
+        "quantiles": [0.5], "fill_values": {}}))
+    b = bundle.pack(d, tmp_path / "bundles")
+    with pytest.raises(ValueError, match="usage"):
+        bundle.install(b, tmp_path / "models")
+    assert not (tmp_path / "models" / "current").exists()
 
 
 def test_sync_from_local_pointer(models_dir, tmp_path):
