@@ -137,11 +137,46 @@ synthetic league (used by the test suite, works offline).
 - **Simulation tab** — projected median score, win-probability bar, points
   floor/ceiling strips, pass/run mix by down, drive-outcome shares, and
   expected snap counts per player with p10–p90 whiskers
+- **Draft tab** — season-long projections by position: totals, a floor–ceiling
+  envelope, VORP over the replacement starter, a weekly heat strip, and the
+  market cross-reference below
 - **Player search** — jump straight to any player's matchup
 
 No build step: it's a hand-rolled SPA (vanilla JS + CSS) served by FastAPI.
 The categorical palette (position badges) is colorblind-validated against the
 dark surface; identity is never encoded by color alone.
+
+## Draft board and the market cross-reference
+
+The draft board scores our own season projection against three outside
+opinions, so the board shows where we disagree with the room:
+
+```bash
+gameday market --season 2026     # ESPN + FFToday + Sleeper -> latest_market.parquet
+```
+
+- **ESPN** — a real ADP, PPR draft rank, auction value, and ESPN's own season
+  projection (public `kona_player_info` endpoint, no auth).
+- **FFToday** — the per-position projection tables, **re-scored to PPR from the
+  component stats**; their published `FPts` column is standard scoring and is
+  never read.
+- **Sleeper** — `search_rank` only. Sleeper publishes no ADP, and search_rank is
+  a lumpy, tie-heavy ordering, so it is used purely as a fallback ranking for
+  players ESPN doesn't rank.
+
+`/api/draft` then adds **value** (market rank − our rank, flagged sleeper/reach
+inside the draftable top 180) and **spread** (the gap between our, ESPN's, and
+FFToday's season projections). Players no source matches keep blank columns, and
+the response reports per-source match coverage — a broken scraper should look
+broken, not look like consensus.
+
+Two operational notes:
+
+- `gameday market` is deliberately **separate from `gameday refresh`**, which
+  self-gates when no game is within `--horizon-days` (8). August is exactly when
+  drafts happen and when that gate is closed.
+- For the same reason, regenerating `latest_season.parquet` in the offseason
+  needs `gameday refresh --horizon-days 90`.
 
 ## API
 
@@ -150,6 +185,7 @@ dark surface; identity is never encoded by color alone.
 | `GET /api/slate` | upcoming games + venue/weather + headliners |
 | `GET /api/game/{game_id}` | both teams' full player forecasts |
 | `GET /api/game/{game_id}/sim` | Monte Carlo aggregates: win prob, play calls, snaps |
+| `GET /api/draft?position=&tier=` | draft board + ADP, value vs market, projection spread |
 | `GET /api/players?q=` | player search across the slate |
 | `GET /api/health` | liveness |
 

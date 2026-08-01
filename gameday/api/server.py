@@ -20,9 +20,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from gameday import bundle
-from gameday.config import (ARTIFACTS_DIR, FORECASTS_DIR, MODELS_ROOT,
-                            POSITION_STATS, QUANTILES, REPLACEMENT_RANK, ROOT,
-                            SEASON_MAX_WEEK)
+from gameday.config import (ARTIFACTS_DIR, DRAFT_POOL_SIZE, FORECASTS_DIR,
+                            MODELS_ROOT, POSITION_STATS, QUANTILES,
+                            REPLACEMENT_RANK, ROOT, SEASON_MAX_WEEK,
+                            VALUE_ROUND_SIZE)
 from gameday.data.teams import TEAMS
 
 app = FastAPI(title="Gameday Forecaster", version="0.1.0")
@@ -295,10 +296,110 @@ def _draft_rows(df: pd.DataFrame) -> list[dict]:
     return out
 
 
+MARKET_FIELDS = ["espn_adp", "espn_rank_ppr", "espn_auction", "espn_proj_pts",
+                 "fft_proj_ppr", "sleeper_rank"]
+
+
+def _load_market() -> tuple[dict, dict]:
+    """({player_id: {external fields}}, meta) from the market artifact.
+
+    Absent or unreadable artifact -> ({}, {}). The draft board predates this
+    cross-reference and must keep working without it.
+    """
+    path = FORECASTS_DIR / "latest_market.parquet"
+    meta_path = FORECASTS_DIR / "latest_market.json"
+    if not path.exists():
+        return {}, {}
+
+    def load():
+        try:
+            df = pd.read_parquet(path)
+        except Exception:  # noqa: BLE001 — a bad artifact must not 500 the board
+            return {}, {}
+        cols = [c for c in MARKET_FIELDS if c in df.columns]
+        rows = {str(r["player_id"]): {c: r[c] for c in cols}
+                for _, r in df.iterrows()}
+        try:
+            meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        except (OSError, ValueError):
+            meta = {}
+        return rows, meta
+
+    return _mtime_cached("market", [path, meta_path], load)
+
+
+def _attach_market(players: list[dict], partial_season: bool) -> dict:
+    """Add external projections, a market rank, value-vs-market, and spread.
+
+    Ranks are computed over the players *some* source has an opinion about.
+    Our own board carries backup QBs that no outside source projects (the
+    season projection scaffolds every rostered player), and letting them
+    consume rank slots would shift every real player's value. Players with no
+    market signal keep null ranks and a value_tier of "unranked".
+    """
+    market, meta = _load_market()
+    for p in players:
+        ext = market.get(str(p["player_id"]), {})
+        for field in MARKET_FIELDS:
+            value = ext.get(field)
+            p[field] = None if value is None or pd.isna(value) else float(value)
+        p.update(market_rank=None, our_rank=None, value=None, value_tier="unranked",
+                 proj_spread=None, proj_spread_pct=None, proj_sources=0,
+                 proj_min=None, proj_max=None, market_source=None)
+
+    # ESPN ADP is the only real ADP here; Sleeper's search_rank is a coarse,
+    # tie-heavy ordering, so it only orders players ESPN doesn't rank at all.
+    def market_key(p):
+        if p["espn_adp"]:
+            return (0, p["espn_adp"])
+        return (1, p["sleeper_rank"])
+
+    ranked = [p for p in players if p["espn_adp"] or p["sleeper_rank"]]
+    for rank, p in enumerate(sorted(ranked, key=market_key), start=1):
+        p["market_rank"] = rank
+        p["market_source"] = "espn_adp" if p["espn_adp"] else "sleeper_rank"
+    for rank, p in enumerate(sorted(ranked, key=lambda p: -p["vorp"]), start=1):
+        p["our_rank"] = rank
+        p["value"] = p["market_rank"] - rank
+        # Only flag players at least one board considers draftable. Deeper than
+        # that, ESPN floor-clamps ADP into a ~170 pileup and our own ordering is
+        # ranking players nobody takes, so the gap between them is not a signal.
+        draftable = min(rank, p["market_rank"]) <= DRAFT_POOL_SIZE
+        p["value_tier"] = "" if not draftable else (
+            "sleeper" if p["value"] >= VALUE_ROUND_SIZE else
+            "reach" if p["value"] <= -VALUE_ROUND_SIZE else "")
+
+    # Projection spread across the three point projections. Our total covers
+    # weeks first_week..18 only, so mid-season it is not comparable with the
+    # full-season numbers ESPN and FFToday publish — omit rather than mislead.
+    if not partial_season:
+        for p in players:
+            projections = [v for v in (p["total_p50"], p["espn_proj_pts"],
+                                       p["fft_proj_ppr"]) if v]
+            p["proj_sources"] = len(projections)
+            if len(projections) < 2:
+                continue
+            low, high = min(projections), max(projections)
+            mean = sum(projections) / len(projections)
+            p.update(proj_min=round(low, 1), proj_max=round(high, 1),
+                     proj_spread=round(high - low, 1),
+                     proj_spread_pct=round((high - low) / mean, 3) if mean else None)
+
+    return {
+        "available": bool(market),
+        "fetched_at": meta.get("fetched_at"),
+        "coverage": meta.get("coverage", {}),
+        "partial_season": partial_season,
+        "ranked_players": len(ranked),
+        "round_size": VALUE_ROUND_SIZE,
+        "draft_pool_size": DRAFT_POOL_SIZE,
+    }
+
+
 @app.get("/api/draft")
-def draft_board(position: str = "ALL", limit: int = 300):
-    """Season-long draft board: per-player weekly medians, season totals, and
-    VORP (total minus the replacement-rank player's total at that position)."""
+def draft_board(position: str = "ALL", tier: str = "", limit: int = 300):
+    """Season-long draft board: per-player weekly medians, season totals, VORP,
+    and the ESPN/FFToday/Sleeper cross-reference (value vs market, spread)."""
     df = _load_season()
     players = _draft_rows(df)
 
@@ -311,22 +412,33 @@ def draft_board(position: str = "ALL", limit: int = 300):
     for p in players:
         p["vorp"] = round(p["total_p50"] - baselines.get(p["position"], 0.0), 1)
 
+    first_week = int(df["week"].min())
+    # Ranks and value are computed across the whole board before any filter, so
+    # clicking a position pill never changes a player's numbers.
+    market_meta = _attach_market(players, partial_season=first_week > 1)
+
     position = position.upper()
     if position != "ALL":
         if position not in POSITION_STATS:
             raise HTTPException(status_code=404, detail=f"unknown position {position}")
         players = [p for p in players if p["position"] == position]
+    if tier:
+        if tier not in ("sleeper", "reach"):
+            raise HTTPException(status_code=404, detail=f"unknown tier {tier}")
+        players = [p for p in players if p["value_tier"] == tier]
     players.sort(key=lambda p: p["vorp"], reverse=True)
 
     meta = _forecast_meta() or {}
     return _clean({
         "position": position,
+        "tier": tier,
         "season": int(df["season"].iloc[0]),
-        "first_week": int(df["week"].min()),
+        "first_week": first_week,
         "last_week": int(df["week"].max()),
         "replacement": baselines,
         "model_version": meta.get("model_version"),
         "generated_at": meta.get("generated_at"),
+        "market": market_meta,
         "players": players[:limit],
     })
 

@@ -654,11 +654,65 @@ function wkStrip(weeks, firstWeek, lastWeek, posMax) {
   return `<span class="wk-strip">${cells.join("")}</span>`;
 }
 
-async function renderDraft(position = "ALL") {
+/* Market columns. `value` is (market rank − our rank) over the players some
+   outside source actually ranks, so a positive number means we like a player
+   more than the room does. Everything degrades to an em dash: the board has to
+   read correctly when latest_market.parquet is missing or a source is stale. */
+
+function adpCell(p) {
+  if (p.espn_adp) return `<span data-tip="ESPN average draft position">${p.espn_adp.toFixed(1)}</span>`;
+  if (p.sleeper_rank) {
+    return `<span class="draft-dim" data-tip="No ESPN ADP — Sleeper search rank ${p.sleeper_rank}
+                   (a coarse ordering, not an ADP)">~${p.sleeper_rank}</span>`;
+  }
+  return `<span class="draft-dim" data-tip="No outside source ranks this player">—</span>`;
+}
+
+function valueCell(p) {
+  if (p.value == null) return `<span class="draft-dim">—</span>`;
+  const tip = `Our board: #${p.our_rank} · market: #${p.market_rank}`;
+  const badge = p.value_tier
+    ? `<span class="value-badge ${p.value_tier}">${p.value_tier === "sleeper" ? "sleeper" : "reach"}</span>`
+    : "";
+  return `<span class="draft-value ${p.value > 0 ? "up" : p.value < 0 ? "down" : ""}"
+                data-tip="${tip}">${p.value > 0 ? "+" : ""}${p.value}</span>${badge}`;
+}
+
+function spreadCell(p) {
+  if (p.proj_spread == null) {
+    return `<span class="draft-dim" data-tip="Needs at least two projections">—</span>`;
+  }
+  const parts = [`ours ${fmt(p.total_p50)}`];
+  if (p.espn_proj_pts) parts.push(`ESPN ${fmt(p.espn_proj_pts)}`);
+  if (p.fft_proj_ppr) parts.push(`FFToday ${fmt(p.fft_proj_ppr)}`);
+  const wide = p.proj_spread_pct >= 0.15;
+  return `<span class="draft-spread ${wide ? "wide" : ""}"
+                data-tip="${parts.join(" · ")} — ${p.proj_sources} of 3 sources"
+          >±${fmt(p.proj_spread)}<span class="draft-dim"> ${p.proj_sources}/3</span></span>`;
+}
+
+function marketNote(market) {
+  if (!market || !market.available) {
+    return `No market data — run <code>gameday market</code> to add ESPN / FFToday / Sleeper.`;
+  }
+  if (market.partial_season) {
+    return `Market: ADP and value shown; projection spread hidden mid-season
+            (our total covers the remaining weeks, ESPN and FFToday are full-season).`;
+  }
+  const cov = Object.entries(market.coverage || {})
+    .map(([k, v]) => `${k} ${v.top100}/100`).join(" · ");
+  const age = market.fetched_at
+    ? `fetched ${new Date(market.fetched_at).toLocaleString()}` : "";
+  return `Top-100 match rate — ${cov} · ${age}.
+          Unmatched players are mostly backup QBs no outside source projects.`;
+}
+
+async function renderDraft(position = "ALL", tier = "") {
   view.innerHTML = `<div class="loading"><div class="spinner"></div><p>Building the draft board…</p></div>`;
   let data;
   try {
-    data = await api(`/api/draft?position=${encodeURIComponent(position)}`);
+    data = await api(`/api/draft?position=${encodeURIComponent(position)}`
+                     + `&tier=${encodeURIComponent(tier)}`);
   } catch (err) {
     if (err.status === 404) {
       view.innerHTML = `<div class="error-box"><h2>No season projection yet</h2>
@@ -670,6 +724,7 @@ async function renderDraft(position = "ALL") {
   const players = data.players || [];
   weekPill.textContent = `${data.season} draft`;
   const positions = ["ALL", "QB", "RB", "WR", "TE"];
+  const tiers = [["sleepers", "sleeper"], ["reaches", "reach"]];
   // Week-cell shading is scaled per position (vs the position's best week),
   // so an ALL view still reads sensibly within each row's position.
   const posMax = {};
@@ -681,14 +736,22 @@ async function renderDraft(position = "ALL") {
     <div class="section-title">Draft Board — ${data.season} · weeks ${data.first_week}–${data.last_week}</div>
     <div class="draft-pills">
       ${positions.map((p) => `
-        <button class="draft-pill ${p === position ? "active" : ""}" data-pos="${p}">${p}</button>`).join("")}
+        <button class="draft-pill ${!tier && p === position ? "active" : ""}"
+                data-hash="${p === "ALL" ? "#draft" : `#draft/${p}`}">${p}</button>`).join("")}
+      <span class="draft-pill-sep"></span>
+      ${tiers.map(([slug, name]) => `
+        <button class="draft-pill tier ${tier === name ? "active" : ""}"
+                data-hash="#draft/${slug}">${slug}</button>`).join("")}
     </div>
+    ${players.length ? "" : `<div class="draft-note">No players match this filter.</div>`}
     <div class="draft-scroll">
     <table class="draft-table">
       <thead><tr>
         <th></th><th>Player</th><th>Pos</th><th>Team</th><th>Bye</th>
         <th class="num">Total</th><th class="num">Floor–Ceiling</th>
-        <th class="num">VORP</th><th>Weekly projection</th>
+        <th class="num">VORP</th>
+        <th class="num">ADP</th><th class="num">Value</th><th class="num">Spread</th>
+        <th>Weekly projection</th>
       </tr></thead>
       <tbody>
         ${players.map((p, i) => `
@@ -701,6 +764,9 @@ async function renderDraft(position = "ALL") {
             <td class="num"><b>${fmt(p.total_p50)}</b></td>
             <td class="num">${fmt(p.total_floor)}–${fmt(p.total_ceiling)}</td>
             <td class="num draft-vorp ${p.vorp < 0 ? "neg" : ""}">${p.vorp > 0 ? "+" : ""}${fmt(p.vorp)}</td>
+            <td class="num">${adpCell(p)}</td>
+            <td class="num">${valueCell(p)}</td>
+            <td class="num">${spreadCell(p)}</td>
             <td>${wkStrip(p.weeks || {}, data.first_week, data.last_week, posMax[p.position])}</td>
           </tr>`).join("")}
       </tbody>
@@ -711,11 +777,16 @@ async function renderDraft(position = "ALL") {
       VORP = points over the replacement starter
       (${Object.entries(data.replacement || {}).map(([k, v]) => `${k}${REPL_RANKS[k] || ""} ${fmt(v)}`).join(" · ")}) ·
       floor–ceiling sums weekly p25/p75 — an envelope, not a season quantile.
+    </div>
+    <div class="draft-note">
+      Value = market rank − our rank across the ${data.market?.ranked_players || 0} players an
+      outside source ranks; positive means we are higher on them than the room
+      (±${data.market?.round_size || 12} = one round). Sleeper/reach flags only fire inside the
+      draftable top ${data.market?.draft_pool_size || 180}. Spread = the gap between our, ESPN's,
+      and FFToday's season projections. ${marketNote(data.market)}
     </div>`;
   view.querySelectorAll(".draft-pill").forEach((btn) =>
-    btn.addEventListener("click", () => {
-      location.hash = btn.dataset.pos === "ALL" ? "#draft" : `#draft/${btn.dataset.pos}`;
-    }));
+    btn.addEventListener("click", () => { location.hash = btn.dataset.hash; }));
   bindTipTargets();
 }
 
@@ -764,6 +835,8 @@ function route() {
     renderReplayPlayer(Number(m[1]), Number(m[2]), decodeURIComponent(m[3]));
   } else if ((m = h.match(/^#replay(?:\/(\d+))?(?:\/(\d+))?$/))) {
     renderReplay(m[1] ? Number(m[1]) : null, m[2] ? Number(m[2]) : null);
+  } else if ((m = h.match(/^#draft\/(sleepers|reaches)$/))) {
+    renderDraft("ALL", m[1] === "sleepers" ? "sleeper" : "reach");
   } else if ((m = h.match(/^#draft(?:\/(QB|RB|WR|TE))?$/))) {
     renderDraft(m[1] || "ALL");
   } else if ((m = h.match(/^#game\/(.+)$/))) {

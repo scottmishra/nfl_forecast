@@ -35,6 +35,19 @@
   .wk-cell.bye { background: none; border: 1px dashed var(--line, #2a3245); }
   .draft-note { margin-top: 10px; font-size: 12px; color: var(--ink-3, #8b93a7); }
   .draft-scroll { overflow-x: auto; }
+  /* market cross-reference (ESPN / FFToday / Sleeper) */
+  .draft-pill-sep { width: 1px; background: var(--line, #2a3245); margin: 2px 4px; }
+  .draft-pill.tier { text-transform: capitalize; }
+  .draft-dim { color: var(--ink-3, #8b93a7); font-weight: 400; }
+  /* reuses the scorecard's pos/neg hues so the whole app reads one way */
+  .draft-value { font-weight: 700; }
+  .draft-value.up { color: #4bd07a; }
+  .draft-value.down { color: #ff7a7a; }
+  .value-badge { margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+                 font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+  .value-badge.sleeper { background: rgba(75,208,122,.16); color: #4bd07a; }
+  .value-badge.reach { background: rgba(255,122,122,.16); color: #ff7a7a; }
+  .draft-spread.wide { color: #ffcf4a; font-weight: 700; }
 </style>
 </head>
 <body data-palette="#3987e5,#008300,#d55181,#c98500">

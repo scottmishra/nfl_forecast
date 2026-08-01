@@ -204,6 +204,33 @@ def refresh(
     raise typer.Exit(code)
 
 
+@app.command()
+def market(
+    season: int = typer.Option(0, help="season to pull (default: the current NFL season)"),
+    force: bool = typer.Option(False, help="ignore the per-source cache TTLs"),
+):
+    """Refresh the draft-board market cross-reference (ESPN / FFToday / Sleeper).
+
+    Deliberately independent of `gameday refresh`, which self-gates in the
+    offseason — August is exactly when drafts happen and when the refresh gate
+    is closed.
+    """
+    from gameday.data import market as market_mod
+    from gameday.data.releases import current_nfl_season
+
+    season = season or current_nfl_season()
+    try:
+        meta = market_mod.refresh_market(season, force=force)
+    except RuntimeError as exc:
+        typer.echo(f"market refresh failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"{meta['rows']} players -> {market_mod.MARKET_PATH}")
+    for name, cov in meta["coverage"].items():
+        typer.echo(f"  {name:<8} {cov['matched']:>4}/{cov['total']} matched "
+                   f"· {cov['top100']}/100 of the draftable top 100")
+
+
 models_app = typer.Typer(help="Model bundle ops: status, publish, sync, rollback",
                          no_args_is_help=True)
 app.add_typer(models_app, name="models")

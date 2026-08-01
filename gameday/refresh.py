@@ -114,6 +114,19 @@ def _emit_season_artifact(feats: pd.DataFrame, full_games: pd.DataFrame,
         log.warning("season artifact skipped (%s)", exc)
 
 
+def _emit_market_artifact(season: int) -> None:
+    """Best-effort: refresh the ESPN/FFToday/Sleeper draft cross-reference.
+
+    In-season convenience only — the offseason gate above means this never runs
+    during draft season, so `gameday market` is the primary entry point.
+    """
+    try:
+        from gameday.data.market import refresh_market
+        refresh_market(season)
+    except Exception as exc:  # noqa: BLE001 — market data is non-critical
+        log.warning("market artifact skipped (%s)", exc)
+
+
 def _emit_usage_artifact(feats: pd.DataFrame, result: pd.DataFrame) -> None:
     """Best-effort: each slate player's last-8-played-weeks usage rows
     (USAGE_ARTIFACT_COLS, filtered to those present) -> latest_usage.parquet
@@ -191,6 +204,8 @@ def run_refresh(horizon_days: int = 8, sims: int = 300, sync: bool = True,
         })
         _emit_usage_artifact(data.feats, result)  # best-effort, never fatal
         _emit_season_artifact(data.feats, games, engine)  # best-effort too
+        _emit_market_artifact(releases.current_nfl_season())  # after the season artifact,
+        #                                                       so coverage can measure it
         status["ok"] = True
         log.info("refresh complete: %d forecasts, models %s",
                  len(result), manifest.get("version"))

@@ -51,6 +51,22 @@ SEASON_MAX_WEEK = 18  # regular season only — draft value ignores playoffs
 # starting slots). VORP = season total minus the Nth-ranked player's total.
 REPLACEMENT_RANK = {"QB": 12, "RB": 30, "WR": 36, "TE": 12}
 
+# Draft-market cross-reference (gameday/data/market.py -> latest_market.parquet).
+# How far our rank must sit from the market's before a player is called a
+# sleeper/reach: one full round in a 12-team league.
+VALUE_ROUND_SIZE = 12
+# Sleeper/reach flags only fire inside the draftable window (12 teams x 15
+# rounds). Past that, both ranks are noise — ESPN floor-clamps ADP around 170
+# and our own board is ordering players nobody drafts, so a 40-slot "gap"
+# between two undrafted players means nothing.
+DRAFT_POOL_SIZE = 180
+# Revalidation windows per source. ESPN ADP moves daily in August; FFToday
+# republishes projections a couple of times a week; the Sleeper dump (~15 MB)
+# and the ID crosswalk change slowly.
+MARKET_TTL_HOURS = {"espn": 6.0, "fftoday": 12.0, "sleeper": 24.0, "crosswalk": 24.0}
+FFTODAY_POS_IDS = {"QB": 10, "RB": 20, "WR": 30, "TE": 40}
+FFTODAY_PAGES = 3  # 50 rows per page — 150 per position covers the draftable pool
+
 
 @dataclass
 class GBMParams:
