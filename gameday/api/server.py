@@ -542,9 +542,27 @@ def replay_player(season: int, week: int, player_id: str):
     return _replay_player_payload(rows.iloc[0])
 
 
+class RevalidatingStatics(StaticFiles):
+    """Static files that must be revalidated on every load.
+
+    Without this, StaticFiles sends an ETag and Last-Modified but no
+    Cache-Control, so browsers apply a heuristic freshness window and keep
+    serving a stale app.js after a deploy — the dashboard silently runs old
+    code until someone hard-reloads. `no-cache` still allows the cache to be
+    used, it just forces a revalidation first, so the common case is a cheap
+    304 rather than a re-download.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 if WEB_DIR.exists():
     @app.get("/")
     def index():
-        return FileResponse(WEB_DIR / "index.html")
+        return FileResponse(WEB_DIR / "index.html",
+                            headers={"Cache-Control": "no-cache"})
 
-    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    app.mount("/static", RevalidatingStatics(directory=WEB_DIR), name="static")
