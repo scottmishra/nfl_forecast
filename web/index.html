@@ -48,6 +48,55 @@
   .value-badge.sleeper { background: rgba(75,208,122,.16); color: #4bd07a; }
   .value-badge.reach { background: rgba(255,122,122,.16); color: #ff7a7a; }
   .draft-spread.wide { color: #ffcf4a; font-weight: 700; }
+  /* ---------- draft agent panel ---------- */
+  .ask-fab { position: fixed; right: 18px; bottom: 18px; z-index: 60;
+             display: flex; align-items: center; gap: 7px;
+             border: 1px solid var(--edge, #232b3b); border-radius: 999px;
+             background: var(--surface-2, #181e2a); color: var(--ink, #f4f6fa);
+             padding: 10px 16px; font: inherit; font-size: 14px; cursor: pointer;
+             box-shadow: 0 6px 24px rgba(0,0,0,.45); }
+  .ask-fab:hover { border-color: var(--accent, #3987e5); }
+  .ask-fab[hidden] { display: none; }
+  .ask-panel { position: fixed; right: 18px; bottom: 18px; z-index: 61;
+               width: min(430px, calc(100vw - 36px)); height: min(620px, calc(100vh - 96px));
+               display: flex; flex-direction: column; overflow: hidden;
+               border: 1px solid var(--edge, #232b3b); border-radius: 14px;
+               background: var(--surface, #12161f); box-shadow: 0 10px 40px rgba(0,0,0,.55); }
+  .ask-panel[hidden] { display: none; }
+  .ask-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+              border-bottom: 1px solid var(--edge, #232b3b); flex: none; }
+  .ask-title { font-weight: 700; letter-spacing: .04em; text-transform: uppercase; font-size: 12px; }
+  .ask-ctx { flex: 1; font-size: 11px; color: var(--ink-3, #6b7686); overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+  .ask-icon { border: 0; background: none; color: var(--ink-3, #6b7686); cursor: pointer;
+              font-size: 14px; padding: 2px 4px; }
+  .ask-icon:hover { color: var(--ink, #f4f6fa); }
+  .ask-log { flex: 1; overflow-y: auto; padding: 12px; display: flex;
+             flex-direction: column; gap: 12px; font-size: 13.5px; line-height: 1.5; }
+  .ask-msg.user { align-self: flex-end; max-width: 85%; background: var(--accent-soft, rgba(57,135,229,.22));
+                  border-radius: 12px 12px 2px 12px; padding: 7px 11px; }
+  .ask-msg.agent { align-self: flex-start; max-width: 100%; white-space: pre-wrap; }
+  .ask-msg.agent a { color: var(--accent, #3987e5); }
+  .ask-msg.err { align-self: flex-start; color: #ff7a7a; font-size: 12.5px; }
+  .ask-tools { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 5px; }
+  .ask-chip { font-size: 10.5px; color: var(--ink-3, #6b7686); border: 1px solid var(--edge, #232b3b);
+              border-radius: 999px; padding: 1px 8px; }
+  .ask-chip.live { color: var(--accent, #3987e5); border-color: var(--accent, #3987e5); }
+  .ask-hint { color: var(--ink-3, #6b7686); font-size: 12px; }
+  .ask-hint code { color: var(--ink-2, #aab4c4); }
+  .ask-form { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--edge, #232b3b); flex: none; }
+  .ask-form textarea { flex: 1; resize: none; max-height: 120px; font: inherit; font-size: 13.5px;
+                       color: inherit; background: var(--surface-2, #181e2a); padding: 8px 10px;
+                       border: 1px solid var(--edge, #232b3b); border-radius: 9px; }
+  .ask-form textarea:focus { outline: none; border-color: var(--accent, #3987e5); }
+  .ask-send { flex: none; width: 36px; border-radius: 9px; cursor: pointer; font-size: 15px;
+              border: 1px solid var(--accent, #3987e5); background: var(--accent, #3987e5); color: #fff; }
+  .ask-send[disabled] { opacity: .45; cursor: default; }
+  @media (max-width: 560px) {
+    /* Drafting from a phone: full-bleed, and don't fight the on-screen keyboard. */
+    .ask-panel { right: 0; bottom: 0; width: 100vw; height: 88vh; border-radius: 14px 14px 0 0; }
+    .ask-fab { right: 12px; bottom: 12px; }
+  }
 </style>
 </head>
 <body data-palette="#3987e5,#008300,#d55181,#c98500">
@@ -86,6 +135,26 @@
 </footer>
 
 <div id="tooltip" class="tooltip" hidden></div>
+
+<!-- Draft agent. Lives outside #view so the transcript survives route changes. -->
+<button id="ask-fab" class="ask-fab" aria-label="Ask the draft agent" title="Ask (/)">
+  <span aria-hidden="true">🏈</span><span class="ask-fab-text">Ask</span>
+</button>
+<section id="ask-panel" class="ask-panel" hidden aria-label="Draft agent">
+  <header class="ask-head">
+    <span class="ask-title">Ask</span>
+    <span class="ask-ctx" id="ask-ctx"></span>
+    <button class="ask-icon" id="ask-reset" title="New conversation">⟲</button>
+    <button class="ask-icon" id="ask-close" title="Close (Esc)">✕</button>
+  </header>
+  <div class="ask-log" id="ask-log"></div>
+  <form class="ask-form" id="ask-form">
+    <textarea id="ask-input" rows="1" placeholder="Ask about a player, a pick, a tier…"
+              aria-label="Your question"></textarea>
+    <button type="submit" class="ask-send" id="ask-send" title="Send (Enter)">↑</button>
+  </form>
+</section>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

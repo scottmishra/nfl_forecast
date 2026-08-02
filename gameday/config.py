@@ -67,6 +67,16 @@ MARKET_TTL_HOURS = {"espn": 6.0, "fftoday": 12.0, "sleeper": 24.0, "crosswalk": 
 FFTODAY_POS_IDS = {"QB": 10, "RB": 20, "WR": 30, "TE": 40}
 FFTODAY_PAGES = 3  # 50 rows per page — 150 per position covers the draftable pool
 
+# Draft chat agent (gameday/agent/, served by /api/chat).
+# Sonnet over Opus on purpose: answers land during a live draft clock, and this
+# runs on a Claude subscription whose rate limits are shared with everything
+# else. Turn and budget caps bound a runaway loop.
+AGENT_MODEL = os.environ.get("GAMEDAY_AGENT_MODEL", "claude-sonnet-5")
+AGENT_MAX_TURNS = int(os.environ.get("GAMEDAY_AGENT_MAX_TURNS", "14"))
+# Each live session holds a `claude` subprocess; the Pi has 8 GB and one user.
+AGENT_MAX_SESSIONS = int(os.environ.get("GAMEDAY_AGENT_MAX_SESSIONS", "3"))
+AGENT_SESSION_TTL_MIN = float(os.environ.get("GAMEDAY_AGENT_SESSION_TTL_MIN", "45"))
+
 
 @dataclass
 class GBMParams:

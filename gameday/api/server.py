@@ -542,6 +542,27 @@ def replay_player(season: int, week: int, player_id: str):
     return _replay_player_payload(rows.iloc[0])
 
 
+# --------------------------------------------------------------------------
+# draft chat agent — additive, and optional. `claude-agent-sdk` is an extra
+# (`pip install -e '.[agent]'`), so a plain install still serves the dashboard;
+# the chat panel then reports itself unavailable instead of 500ing the app.
+# --------------------------------------------------------------------------
+
+try:
+    from gameday.api.chat import router as chat_router
+
+    app.include_router(chat_router)
+except Exception as exc:  # noqa: BLE001 — never block the dashboard on the agent
+    import logging
+
+    logging.getLogger(__name__).info("chat agent not mounted (%s)", exc)
+
+    @app.get("/api/chat/health")
+    def chat_unavailable():  # type: ignore[misc]
+        return {"available": False, "sdk_installed": False, "live_sessions": 0,
+                "problems": [f"chat router failed to load: {exc}"]}
+
+
 class RevalidatingStatics(StaticFiles):
     """Static files that must be revalidated on every load.
 

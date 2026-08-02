@@ -28,6 +28,12 @@ gpu = [
 social = [
     "praw>=7.7",             # Reddit ingestion for the buzz signal
 ]
+agent = [
+    # Draft chat agent (/api/chat). Optional: the dashboard serves fine without
+    # it, and the chat panel reports itself unavailable. Also needs the Claude
+    # Code CLI on the host — the SDK drives it as a subprocess.
+    "claude-agent-sdk>=0.2",
+]
 dev = [
     "pytest>=7.4",
 ]

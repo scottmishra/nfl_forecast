@@ -854,3 +854,215 @@ document.getElementById("brand-link").addEventListener("click", (e) => {
 
 window.addEventListener("hashchange", route);
 route();
+
+/* ---------- draft agent panel ----------
+   Lives outside #view, so the transcript survives navigation: you can ask about
+   a player, click through to the Draft board, and keep the thread. */
+
+const askEls = {
+  fab: document.getElementById("ask-fab"),
+  panel: document.getElementById("ask-panel"),
+  log: document.getElementById("ask-log"),
+  form: document.getElementById("ask-form"),
+  input: document.getElementById("ask-input"),
+  send: document.getElementById("ask-send"),
+  ctx: document.getElementById("ask-ctx"),
+};
+
+// Stable across reloads so the server-side conversation is re-found, not re-spawned.
+const ASK_SESSION = (() => {
+  let id = sessionStorage.getItem("gameday-ask-session");
+  if (!id) {
+    id = `ask-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+    sessionStorage.setItem("gameday-ask-session", id);
+  }
+  return id;
+})();
+
+let askBusy = false;
+
+/* A human-readable description of where the user is, so "what about him?"
+   resolves without retyping a name. */
+function askContext() {
+  const h = location.hash || "#";
+  let m;
+  if ((m = h.match(/^#draft\/(sleepers|reaches)$/))) return `Draft board, ${m[1]} filter`;
+  if ((m = h.match(/^#draft\/(QB|RB|WR|TE)$/))) return `Draft board, ${m[1]} only`;
+  if (h.startsWith("#draft")) return "Draft board, all positions";
+  if ((m = h.match(/^#replay\/(\d+)\/(\d+)\/player\/(.+)$/)))
+    return `Replay: ${m[1]} week ${m[2]}, player ${decodeURIComponent(m[3])}`;
+  if ((m = h.match(/^#replay\/(\d+)(?:\/(\d+))?/)))
+    return `Replay: ${m[1]}${m[2] ? ` week ${m[2]}` : ""}`;
+  if (h.startsWith("#replay")) return "Replay view";
+  if ((m = h.match(/^#game\/(.+)$/))) return `Matchup ${decodeURIComponent(m[1])}`;
+  return "Slate view";
+}
+
+function askScroll() { askEls.log.scrollTop = askEls.log.scrollHeight; }
+
+function askAdd(cls, text = "") {
+  const el = document.createElement("div");
+  el.className = `ask-msg ${cls}`;
+  el.textContent = text;
+  askEls.log.appendChild(el);
+  askScroll();
+  return el;
+}
+
+/* Minimal inline rendering: **bold**, `code`, and markdown links (the agent
+   cites sources that way). Everything is escaped first — the agent quotes web
+   content, so its output is never trusted as markup. */
+function askRich(text) {
+  return esc(text)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      (_, label, href) => `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`)
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+function askOpen(open) {
+  askEls.panel.hidden = !open;
+  askEls.fab.hidden = open;
+  if (open) {
+    askEls.ctx.textContent = askContext();
+    askEls.input.focus();
+    if (!askEls.log.childElementCount) {
+      const hint = askAdd("ask-hint");
+      hint.innerHTML =
+        "Ask about a player, a pick, or a tier. Answers come from your own "
+        + "projections — VORP, the p25–p75 envelope, and value vs the market — "
+        + "and the agent decides for itself when it needs usage, past accuracy, or the news.";
+    }
+    askScroll();
+  }
+}
+
+async function askSubmit(question) {
+  if (askBusy || !question.trim()) return;
+  askBusy = true;
+  askEls.send.disabled = true;
+  askAdd("user", question);
+
+  const tools = document.createElement("div");
+  tools.className = "ask-tools";
+  askEls.log.appendChild(tools);
+  const thinking = document.createElement("span");
+  thinking.className = "ask-chip live";
+  thinking.textContent = "thinking…";
+  tools.appendChild(thinking);
+
+  let answer = null;
+  let buffer = "";
+  const finish = () => {
+    thinking.remove();
+    if (!tools.childElementCount) tools.remove();
+    askBusy = false;
+    askEls.send.disabled = false;
+    askScroll();
+  };
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: ASK_SESSION, message: question, context: askContext(),
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      const problems = detail?.detail?.problems;
+      askAdd("err", problems?.length
+        ? `Agent unavailable: ${problems.join("; ")}`
+        : `Agent unavailable (HTTP ${res.status}).`);
+      return finish();
+    }
+
+    // Parse the SSE stream by hand — EventSource can't POST.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const frames = pending.split("\n\n");
+      pending = frames.pop();
+      for (const frame of frames) {
+        const evLine = frame.match(/^event: (.+)$/m);
+        const dataLine = frame.match(/^data: (.+)$/m);
+        if (!evLine || !dataLine) continue;
+        let payload;
+        try { payload = JSON.parse(dataLine[1]); } catch { continue; }
+
+        if (evLine[1] === "tool") {
+          const chip = document.createElement("span");
+          chip.className = "ask-chip";
+          chip.textContent = payload.label;
+          tools.insertBefore(chip, thinking);
+        } else if (evLine[1] === "text") {
+          buffer += payload.text;
+          if (!answer) answer = askAdd("agent");
+          answer.innerHTML = askRich(buffer);
+          askScroll();
+        } else if (evLine[1] === "status") {
+          askAdd("err", payload.message);
+        } else if (evLine[1] === "done") {
+          if (payload.is_error) {
+            askAdd("err", payload.api_error_status === 401
+              ? "Authentication failed — the Claude token has expired. "
+                + "Re-run `claude setup-token` on the server."
+              : payload.result || "The agent hit an error.");
+          }
+        }
+      }
+    }
+  } catch (err) {
+    askAdd("err", `Lost the connection: ${err.message}`);
+  }
+  finish();
+}
+
+askEls.fab.addEventListener("click", () => askOpen(true));
+document.getElementById("ask-close").addEventListener("click", () => askOpen(false));
+document.getElementById("ask-reset").addEventListener("click", async () => {
+  await fetch(`/api/chat/${encodeURIComponent(ASK_SESSION)}`, { method: "DELETE" })
+    .catch(() => {});
+  askEls.log.innerHTML = "";
+  askOpen(true);
+});
+
+askEls.form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = askEls.input.value;
+  askEls.input.value = "";
+  askEls.input.style.height = "auto";
+  askSubmit(q);
+});
+
+askEls.input.addEventListener("input", () => {
+  askEls.input.style.height = "auto";
+  askEls.input.style.height = `${Math.min(askEls.input.scrollHeight, 120)}px`;
+});
+askEls.input.addEventListener("keydown", (e) => {
+  // Enter sends; Shift+Enter is a newline.
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    askEls.form.requestSubmit();
+  }
+});
+
+window.addEventListener("keydown", (e) => {
+  const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
+  if (e.key === "Escape" && !askEls.panel.hidden) return askOpen(false);
+  if (e.key === "/" && !typing) { e.preventDefault(); askOpen(true); }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    askOpen(askEls.panel.hidden);
+  }
+});
+
+// Keep the context label honest as the user navigates with the panel open.
+window.addEventListener("hashchange", () => {
+  if (!askEls.panel.hidden) askEls.ctx.textContent = askContext();
+});
