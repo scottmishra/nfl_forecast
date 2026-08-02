@@ -79,6 +79,21 @@ def _index() -> dict[str, dict]:
     return {p["player_id"]: p for p in _board()}
 
 
+def _with_position_rank(entry: dict) -> dict:
+    """Add `position_rank` (TE4, RB11) alongside the overall rank.
+
+    Without it the agent infers a positional rank from the overall one and gets
+    it wrong — an observed failure, not a hypothetical: Kyle Pitts at overall
+    rank 19 was reported as "TE19" when he is TE4.
+    """
+    same_position = [p for p in _board() if p["position"] == entry["position"]]
+    same_position.sort(key=lambda p: -p["vorp"])
+    rank = next((i for i, p in enumerate(same_position, start=1)
+                 if p["player_id"] == entry["player_id"]), None)
+    return {**entry, "position_rank": rank,
+            "position_rank_label": f"{entry['position']}{rank}" if rank else None}
+
+
 def resolve(who: str) -> dict:
     """A player id or a name -> that player's board entry.
 
@@ -147,7 +162,7 @@ def board(position: str = "ALL", tier: str = "", limit: int = 40) -> dict:
 
 def player(who: str) -> dict:
     """One player's full board entry: projection, envelope, VORP, and market."""
-    return resolve(who)
+    return _with_position_rank(resolve(who))
 
 
 def compare(whos: list[str]) -> dict:
@@ -156,10 +171,10 @@ def compare(whos: list[str]) -> dict:
         raise ToolError("compare_players needs at least two players.")
     if len(whos) > MAX_COMPARE:
         raise ToolError(f"compare_players takes at most {MAX_COMPARE} players.")
-    picked = [resolve(w) for w in whos]
+    picked = [_with_position_rank(resolve(w)) for w in whos]
     fields = ["player_id", "name", "position", "team", "bye", "games",
               "total_p50", "total_floor", "total_ceiling", "vorp",
-              "our_rank", "market_rank", "value", "value_tier",
+              "our_rank", "position_rank_label", "market_rank", "value", "value_tier",
               "espn_adp", "espn_proj_pts", "fft_proj_ppr", "sleeper_rank",
               "proj_spread", "proj_sources"]
     return {"players": [{f: p.get(f) for f in fields} for p in picked],

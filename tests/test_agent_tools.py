@@ -202,7 +202,26 @@ def test_player_detail_matches_the_board_entry(artifacts):
     """A number the agent quotes must be the number the dashboard renders."""
     from_board = next(p for p in data.board(limit=99)["players"]
                       if p["name"] == "Ace Runner")
-    assert data.player("Ace Runner") == from_board
+    detail = data.player("Ace Runner")
+    assert {k: detail[k] for k in from_board} == from_board
+
+
+def test_player_detail_carries_a_positional_rank(artifacts):
+    """Without this the agent infers one from the overall rank and gets it
+    wrong — observed on the Pi, where overall-19 Kyle Pitts was called "TE19"
+    when he is TE4."""
+    harrison = data.player("Marvin Harrison Jr.")   # WR, best of two WRs
+    st_brown = data.player("Amon-Ra St. Brown")
+    assert harrison["position_rank_label"] == "WR1"
+    assert st_brown["position_rank_label"] == "WR2"
+    # The overall rank is a different number, which is the whole point.
+    assert harrison["our_rank"] != harrison["position_rank"] or \
+        st_brown["our_rank"] != st_brown["position_rank"]
+
+
+def test_compare_includes_positional_rank(artifacts):
+    out = data.compare(["Marvin Harrison Jr.", "Amon-Ra St. Brown"])
+    assert [p["position_rank_label"] for p in out["players"]] == ["WR1", "WR2"]
 
 
 def test_compare_requires_two_to_four(artifacts):

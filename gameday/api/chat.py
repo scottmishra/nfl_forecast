@@ -163,6 +163,45 @@ async def reset(session_id: str) -> dict:
 
 
 @router.get("/health")
-def chat_health() -> dict:
-    """Whether the agent can run, and if not, precisely what is missing."""
-    return {**availability(), "live_sessions": MANAGER.live}
+async def chat_health(probe: bool = False) -> dict:
+    """Whether the agent can run, and if not, precisely what is missing.
+
+    The default is a cheap offline check: SDK importable, CLI present, a
+    credential configured (and, for the CLI credential file, not expired).
+
+    `?probe=1` additionally asks the model one trivial question. That is the
+    only way to prove an env-var token is live — it is opaque, so its validity
+    can't be read off disk. Costs a few cents and a couple of seconds; use it
+    after rotating a token, not on a dashboard poll.
+    """
+    state = {**availability(), "live_sessions": MANAGER.live}
+    if not probe or not state["available"]:
+        return state
+
+    session_id = "__health_probe__"
+    started = asyncio.get_running_loop().time()
+    try:
+        session = await MANAGER.get(session_id)
+        await session.client.query("Reply with exactly: OK")
+        from claude_agent_sdk import ResultMessage
+
+        async for message in session.client.receive_response():
+            if isinstance(message, ResultMessage):
+                state["probe"] = {
+                    "ok": not message.is_error,
+                    "api_error_status": message.api_error_status,
+                    "detail": message.result if message.is_error else None,
+                    "seconds": round(
+                        asyncio.get_running_loop().time() - started, 1),
+                }
+                break
+    except Exception as exc:  # noqa: BLE001 — the probe reports, never raises
+        state["probe"] = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+    finally:
+        await MANAGER.drop(session_id)
+
+    if not state["probe"].get("ok"):
+        state["available"] = False
+        state["problems"].append(
+            f"live probe failed: {state['probe'].get('detail')}")
+    return state

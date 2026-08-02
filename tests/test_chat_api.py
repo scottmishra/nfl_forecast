@@ -314,3 +314,60 @@ def test_explicit_cli_path_is_honoured(monkeypatch, tmp_path):
 def test_missing_explicit_cli_path_is_not_silently_ignored(monkeypatch):
     monkeypatch.setenv("GAMEDAY_CLAUDE_CLI", "/nope/claude")
     assert session_mod.find_cli() is None
+
+
+# --------------------------------------------------------------------------
+# credential expiry — a present-but-dead token must not read as healthy
+# --------------------------------------------------------------------------
+
+def _write_creds(tmp_path, monkeypatch, expires_ms):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / ".credentials.json").write_text(json.dumps(
+        {"claudeAiOauth": {"accessToken": "x", "refreshToken": "y",
+                           "expiresAt": expires_ms, "subscriptionType": "max"}}))
+    monkeypatch.setattr(session_mod.Path, "home", staticmethod(lambda: home))
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+
+def test_expired_cli_credential_is_reported_as_a_problem(tmp_path, monkeypatch):
+    """The failure that actually bit: a credential file from June read as
+    'available' right up until the first question 401'd."""
+    import time
+    _write_creds(tmp_path, monkeypatch, int((time.time() - 86_400) * 1000))
+    state = session_mod.availability()
+    assert state["credential"]["expired"] is True
+    assert state["available"] is False
+    assert any("claude setup-token" in p for p in state["problems"])
+
+
+def test_live_cli_credential_is_not_flagged(tmp_path, monkeypatch):
+    import time
+    _write_creds(tmp_path, monkeypatch, int((time.time() + 86_400) * 1000))
+    state = session_mod.availability()
+    assert state["credential"]["expired"] is False
+    assert not any("setup-token" in p for p in state["problems"])
+
+
+def test_env_token_expiry_is_reported_as_unknown_not_assumed_good(monkeypatch):
+    """An env-var token is opaque — say so rather than implying it was checked."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-opaque")
+    assert session_mod.credential_expiry() == {"known": False}
+
+
+def test_probe_reports_a_live_failure(manager, monkeypatch):
+    async def get(session_id):
+        sess = session_mod.Session(session_id=session_id, client=StubClient(script=[
+            _result(is_error=True, api_error_status=401, result="expired")]))
+        manager._sessions[session_id] = sess
+        return sess
+
+    monkeypatch.setattr(manager, "get", get)
+    body = client.get("/api/chat/health?probe=1").json()
+    assert body["probe"]["ok"] is False and body["available"] is False
+    assert any("live probe failed" in p for p in body["problems"])
+
+
+def test_probe_is_skipped_by_default(manager):
+    assert "probe" not in client.get("/api/chat/health").json()

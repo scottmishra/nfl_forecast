@@ -77,6 +77,38 @@ def auth_source() -> str | None:
     return None
 
 
+def credential_expiry() -> dict:
+    """Expiry of the CLI credential file, when that's what we're falling back on.
+
+    A credential file that exists but expired weeks ago reads as healthy to a
+    presence check and then 401s on the first real question — which is exactly
+    what happened on the Pi. This is the cheap half of the fix; a live probe
+    (`/api/chat/health?probe=1`) is the expensive half.
+
+    Only the CLI file can be checked offline. An env-var token is opaque, so
+    `known` is False for it — absence of evidence, reported as such.
+    """
+    if auth_source() != "cli-credentials":
+        return {"known": False}
+    path = Path.home() / ".claude" / ".credentials.json"
+    try:
+        import json
+
+        oauth = json.loads(path.read_text()).get("claudeAiOauth", {})
+        expires_at = oauth.get("expiresAt")
+        if not expires_at:
+            return {"known": False}
+        import datetime as dt
+
+        when = dt.datetime.fromtimestamp(expires_at / 1000, dt.timezone.utc)
+        expired = when < dt.datetime.now(dt.timezone.utc)
+        return {"known": True, "expired": expired,
+                "expires_at": when.isoformat(timespec="seconds"),
+                "subscription": oauth.get("subscriptionType")}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"known": False}
+
+
 def availability() -> dict:
     """Everything needed to diagnose a broken agent, without a live call."""
     try:
@@ -86,6 +118,7 @@ def availability() -> dict:
         sdk = False
     cli = find_cli()
     auth = auth_source()
+    expiry = credential_expiry()
     problems = []
     if not sdk:
         problems.append("claude-agent-sdk is not installed (pip install -e '.[agent]')")
@@ -94,8 +127,14 @@ def availability() -> dict:
     if not auth:
         problems.append("no credentials: set CLAUDE_CODE_OAUTH_TOKEN "
                         "(from `claude setup-token`) or ANTHROPIC_API_KEY")
+    elif expiry.get("expired"):
+        problems.append(
+            f"the CLI credential expired at {expiry['expires_at']} — run "
+            "`claude setup-token` and write CLAUDE_CODE_OAUTH_TOKEN to "
+            "~/.config/gameday/agent.env")
     return {"available": not problems, "sdk_installed": sdk, "cli_path": cli,
-            "auth_source": auth, "model": AGENT_MODEL, "problems": problems}
+            "auth_source": auth, "credential": expiry,
+            "model": AGENT_MODEL, "problems": problems}
 
 
 def build_options(cwd: str | None = None):
